@@ -8,7 +8,11 @@ from scipy.stats import wilcoxon
 
 # ART-NAD tract-variable results live outside the results_13 txt files, as JSON
 # written by scripts/eval_art_nad_tv.py (a separate inversion-model pipeline).
-ART_NAD_TV_ROOT = "results_artmodels/art_nad_tv"
+# The paper reports the raw (un-normalized) tract-variable variant, forced-
+# alignment trimmed: art_nad_tv_raw_fa on the all-reference condition.
+ART_NAD_TV_ROOT = "results_artmodels/art_nad_tv_raw"
+ART_NAD_TV_JSON = "art_nad_tv_raw.json"
+ART_NAD_TV_KEY = "art_nad_tv_raw_fa"
 
 # --- CONFIGURATION ---
 FILE_PATTERN = "results_13/*.txt"
@@ -57,7 +61,7 @@ METRIC_ROW_MAP = {
     'nad_all': 'NAD All',
     'nad_fa_control': 'NAD FA Control',
     'nad_fa_all': 'NAD',
-    'art_nad_tv_fa_all': 'ART-NAD-TV',
+    'art_nad_tv_raw_fa_all': 'ART-NAD-FA',
 }
 
 # Multi-lingual support, Explainability columns per metric key
@@ -75,7 +79,7 @@ METRIC_MULTI_EXPL = {
     'artp':                 (r'\cmark*', r'\cmark'),
     'p_estoi_fa_all':       (r'\cmark',  r'\xmark'),
     'nad_fa_all':           (r'\cmark',  r'\xmark'),
-    'art_nad_tv_fa_all':    (r'\cmark',  r'\cmark'),
+    'art_nad_tv_raw_fa_all': (r'\cmark', r'\cmark'),
 }
 
 # Added Praat metrics here so they are considered for "Best Reference-Free" (underlining)
@@ -253,12 +257,13 @@ def parse_txt_file(filepath):
     return data
 
 def parse_art_nad_tv_jsons(root=ART_NAD_TV_ROOT):
-    """Read ART-NAD-TV results (scripts/eval_art_nad_tv.py output) into the same
-    row format as parse_txt_file. Uses the FA-trimmed, all-reference value
-    (``art_nad_tv_fa`` under ``results.all``) to match how NAD is reported
+    """Read ART-NAD-FA results (scripts/eval_art_nad_tv.py output) into the same
+    row format as parse_txt_file. Uses the paper's variant: the raw (un-
+    normalized) tract-variable, FA-trimmed, all-reference value
+    (``art_nad_tv_raw_fa`` under ``results.all``), to match how NAD is reported
     (``nad_fa_all``). Values are already |Pearson|. Returns [] if none found."""
     data = []
-    for fp in glob.glob(os.path.join(root, "**", "art_nad_tv.json"), recursive=True):
+    for fp in glob.glob(os.path.join(root, "**", ART_NAD_TV_JSON), recursive=True):
         try:
             with open(fp) as f:
                 j = json.load(f)
@@ -291,10 +296,10 @@ def parse_art_nad_tv_jsons(root=ART_NAD_TV_ROOT):
         else:
             cond = 'PU'
 
-        val = j.get("results", {}).get("all", {}).get("art_nad_tv_fa")
+        val = j.get("results", {}).get("all", {}).get(ART_NAD_TV_KEY)
         if val is not None:
             data.append({
-                "MetricKey": "art_nad_tv_fa_all", "Value": float(val),
+                "MetricKey": "art_nad_tv_raw_fa_all", "Value": float(val),
                 "Dataset": dataset, "Type": dtype, "Condition": cond,
             })
     return data
@@ -526,7 +531,7 @@ def generate_latex(df, datasets_root=DATASETS_ROOT):
         ("Reference-Free (Speaker)", ['vsa']),
         ("Reference-Free (Model)", ['double_asr', 'artp_double_asr', 'artp_old']),
         ("Reference-Text", ['per', 'dper', 'artp']),
-        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all', 'art_nad_tv_fa_all']),
+        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all', 'art_nad_tv_raw_fa_all']),
     ]
 
     all_metrics = [m for _, metrics in groups for m in metrics]
@@ -627,7 +632,7 @@ def generate_csv(df):
         ("Reference-Free (Speaker)", ['vsa']),
         ("Reference-Free (Model)", ['double_asr', 'artp_double_asr', 'artp_old']),
         ("Reference-Text", ['per', 'dper', 'artp']),
-        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all', 'art_nad_tv_fa_all']),
+        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all', 'art_nad_tv_raw_fa_all']),
     ]
     all_metrics = [m for _, metrics in groups for m in metrics]
 

@@ -30,6 +30,11 @@ from pathbench.asr_evaluators import PEREvaluator, DirectPEREvaluator, DoubleASR
 from pathbench.f0_range_evaluator import StdPitchEvaluator
 from pathbench.reference_evaluator import ESTOIEvaluator
 from pathbench.nad_evaluator import NADEvaluator, TrimmedNADEvaluator
+from pathbench.articulatory_evaluators import (
+    ARTNADEvaluator, TrimmedARTNADEvaluator,
+    ARTNADAugEvaluator, TrimmedARTNADAugEvaluator,
+)
+from pathbench.model_registry import get_articulatory_runner
 from pathbench.articulatory_precision_evaluator import ArticulatoryPrecisionEvaluator, PhoneticConfidenceEvaluator
 from pathbench.speech_rate import PraatSpeechRateEvaluator
 from pathbench.dataset import Dataset
@@ -48,7 +53,12 @@ from pathbench.utils import write_correlation_table
 PARTIAL_COVERAGE_ALLOWLIST = {"spk2age", "wada_snr"}
 
 # Evaluator keys that require reference audio and are run separately.
+# Extended at runtime when --use-articulatory adds art_nad / art_nad_aug.
 REF_EVALUATOR_NAMES = ["p_estoi", "p_estoi_fa", "nad", "nad_fa"]
+ARTICULATORY_REF_EVALUATOR_NAMES = [
+    "art_nad", "art_nad_fa",
+    "art_nad_aug", "art_nad_aug_fa",
+]
 
 # Evaluator types that produce a single score per speaker (not averaged over utterances).
 _SINGLE_SCORE_TYPES = (
@@ -65,6 +75,10 @@ SUMMARY_METRICS = [
     "nad_control", "nad_all", "wada_snr", "spk2age", "vsa", "std_pitch",
     "cpp_fa", "nad_fa_control", "nad_fa_all", "vsa_fa", "std_pitch_fa",
     "praat_speech_rate", "praat_speech_rate_fa",
+    "art_nad_control", "art_nad_all",
+    "art_nad_fa_control", "art_nad_fa_all",
+    "art_nad_aug_control", "art_nad_aug_all",
+    "art_nad_aug_fa_control", "art_nad_aug_fa_all",
 ]
 
 
@@ -94,40 +108,75 @@ def get_class_hash(instance) -> str:
         return "N/A"
 
 
-def build_evaluators(base_dataset, trimmer):
+def build_evaluators(base_dataset, trimmer, use_articulatory: bool = False,
+                     evaluator_filter=None):
     """Instantiates all utterance- and speaker-level evaluators for a dataset.
+
+    Args:
+        use_articulatory: if True, also register ART-NAD evaluators backed by
+            the speech-to-EMA model in ``tools/articulatory``. Off by default
+            because the model + HuBERT load is expensive and only the
+            articulatory-venv SLURM job needs them.
+        evaluator_filter: optional iterable of evaluator names to keep. When
+            provided, evaluators whose name is not in the set are skipped
+            entirely (lazy factories — their model downloads and constructor
+            costs are avoided). ``spk2score`` is always kept regardless.
 
     Returns:
         utt_evaluators: dict of utterance-level evaluators (including spk2score)
         spk_evaluators: dict of speaker-level evaluators
     """
-    utt_evaluators = {
-        "spk2score":          Spk2ScoreEvaluator(base_dataset.spk2score, base_dataset.utt2spk),
-        "cpp":                CPPEvaluator(),
-        "per":                PEREvaluator(language=base_dataset.language),
-        "dper":               DirectPEREvaluator(),
-        "artp":               ArticulatoryPrecisionEvaluator(),
-        "artp_old":           PhoneticConfidenceEvaluator(),
-        "artp_double_asr":    ArtPDoubleASREvaluator(language=base_dataset.language),
-        "double_asr":         DoubleASREvaluator(language=base_dataset.language),
-        "p_estoi":            ESTOIEvaluator(normalization_method="RMS", centroid_ind=0, frame_deletion=True),
-        "p_estoi_fa":         ForcedAlignmentPESTOIEvaluator(),
-        "nad":                NADEvaluator(),
-        "wada_snr":           WadaSnrEvaluator(),
-        "std_pitch":          StdPitchEvaluator(),
-        "cpp_fa":             TrimmedReferenceFreeEvaluator(inner=CPPEvaluator(), trimmer=trimmer),
-        "nad_fa":             TrimmedNADEvaluator(trimmer=trimmer),
-        "std_pitch_fa":       TrimmedReferenceFreeEvaluator(inner=StdPitchEvaluator(), trimmer=trimmer),
-        "praat_speech_rate":  PraatSpeechRateEvaluator(),
-        "praat_speech_rate_fa": TrimmedReferenceFreeEvaluator(inner=PraatSpeechRateEvaluator(), trimmer=trimmer),
-    }
-    if base_dataset.spk2age:
+    keep = None if evaluator_filter is None else set(evaluator_filter)
+    def _keep(name: str) -> bool:
+        return keep is None or name == "spk2score" or name in keep
+
+    # Lazy factories so models for unselected evaluators are never loaded.
+    utt_factories = [
+        ("spk2score",            lambda: Spk2ScoreEvaluator(base_dataset.spk2score, base_dataset.utt2spk)),
+        ("cpp",                  lambda: CPPEvaluator()),
+        ("per",                  lambda: PEREvaluator(language=base_dataset.language)),
+        ("dper",                 lambda: DirectPEREvaluator()),
+        ("artp",                 lambda: ArticulatoryPrecisionEvaluator()),
+        ("artp_old",             lambda: PhoneticConfidenceEvaluator()),
+        ("artp_double_asr",      lambda: ArtPDoubleASREvaluator(language=base_dataset.language)),
+        ("double_asr",           lambda: DoubleASREvaluator(language=base_dataset.language)),
+        ("p_estoi",              lambda: ESTOIEvaluator(normalization_method="RMS", centroid_ind=0, frame_deletion=True)),
+        ("p_estoi_fa",           lambda: ForcedAlignmentPESTOIEvaluator()),
+        ("nad",                  lambda: NADEvaluator()),
+        ("wada_snr",             lambda: WadaSnrEvaluator()),
+        ("std_pitch",            lambda: StdPitchEvaluator()),
+        ("cpp_fa",               lambda: TrimmedReferenceFreeEvaluator(inner=CPPEvaluator(), trimmer=trimmer)),
+        ("nad_fa",               lambda: TrimmedNADEvaluator(trimmer=trimmer)),
+        ("std_pitch_fa",         lambda: TrimmedReferenceFreeEvaluator(inner=StdPitchEvaluator(), trimmer=trimmer)),
+        ("praat_speech_rate",    lambda: PraatSpeechRateEvaluator()),
+        ("praat_speech_rate_fa", lambda: TrimmedReferenceFreeEvaluator(inner=PraatSpeechRateEvaluator(), trimmer=trimmer)),
+    ]
+    utt_evaluators = {name: f() for name, f in utt_factories if _keep(name)}
+
+    if base_dataset.spk2age and _keep("spk2age"):
         utt_evaluators["spk2age"] = Spk2AgeEvaluator(base_dataset.spk2age, base_dataset.utt2spk)
 
-    spk_evaluators = {
-        "vsa":    VSAEvaluator(),
-        "vsa_fa": TrimmedLanguageAwareSpeakerEvaluator(inner=VSAEvaluator(), trimmer=trimmer),
-    }
+    art_runner = None
+    if use_articulatory:
+        # One runner shared across all articulatory evaluators so the HuBERT
+        # encoder + BiGRU inversion model are loaded exactly once.
+        art_names = ("art_nad", "art_nad_fa", "art_nad_aug", "art_nad_aug_fa")
+        if any(_keep(n) for n in art_names):
+            art_runner = get_articulatory_runner()
+            if _keep("art_nad"):
+                utt_evaluators["art_nad"] = ARTNADEvaluator(runner=art_runner)
+            if _keep("art_nad_fa"):
+                utt_evaluators["art_nad_fa"] = TrimmedARTNADEvaluator(runner=art_runner, trimmer=trimmer)
+            if _keep("art_nad_aug"):
+                utt_evaluators["art_nad_aug"] = ARTNADAugEvaluator(runner=art_runner)
+            if _keep("art_nad_aug_fa"):
+                utt_evaluators["art_nad_aug_fa"] = TrimmedARTNADAugEvaluator(runner=art_runner, trimmer=trimmer)
+
+    spk_factories = [
+        ("vsa",    lambda: VSAEvaluator()),
+        ("vsa_fa", lambda: TrimmedLanguageAwareSpeakerEvaluator(inner=VSAEvaluator(), trimmer=trimmer)),
+    ]
+    spk_evaluators = {name: f() for name, f in spk_factories if _keep(name)}
     return utt_evaluators, spk_evaluators
 
 
@@ -198,12 +247,18 @@ def run_utterance_evaluators(base_dataset, non_ref_evaluators, audio_cache=None)
     return spk_utt_scores
 
 
-def run_reference_evaluators(dataset_dir, utt_evaluators, spk_utt_scores):
+def run_reference_evaluators(dataset_dir, utt_evaluators, spk_utt_scores, ref_evaluator_names=None):
     """Scores utterances with reference-based evaluators for each reference type.
 
     Updates spk_utt_scores in place.
     Utterances without reference audio are skipped.
+
+    ``ref_evaluator_names`` defaults to ``REF_EVALUATOR_NAMES``; the
+    ``--use-articulatory`` caller passes an extended list that includes
+    ``art_nad`` / ``art_nad_aug``.
     """
+    if ref_evaluator_names is None:
+        ref_evaluator_names = REF_EVALUATOR_NAMES
     reference_path = dataset_dir.replace("pathological", "control")
 
     for ref_type in ["control", "all"]:
@@ -228,7 +283,7 @@ def run_reference_evaluators(dataset_dir, utt_evaluators, spk_utt_scores):
             if not reference_audios:
                 continue
 
-            for name in REF_EVALUATOR_NAMES:
+            for name in ref_evaluator_names:
                 evaluator = utt_evaluators[name]
                 try:
                     score = _dispatch_ref_score(
@@ -402,7 +457,8 @@ def write_score_csvs(score_dir, agg_spk_metrics, output_file):
         output_file.write(f"  Wrote {csv_path} ({len(spk_scores)} speakers)\n")
 
 
-def evaluate_dataset(dataset_dir, output_file, results_dir=None):
+def evaluate_dataset(dataset_dir, output_file, results_dir=None, use_articulatory: bool = False,
+                     evaluator_filter=None):
     """Runs the full evaluation pipeline for a single dataset directory."""
     output_file.write(f"Loading dataset: {dataset_dir}\n")
     try:
@@ -419,14 +475,27 @@ def evaluate_dataset(dataset_dir, output_file, results_dir=None):
         return None
 
     trimmer = FATrimmer()
-    utt_evaluators, spk_evaluators = build_evaluators(base_dataset, trimmer)
+    utt_evaluators, spk_evaluators = build_evaluators(
+        base_dataset, trimmer,
+        use_articulatory=use_articulatory,
+        evaluator_filter=evaluator_filter,
+    )
     all_evaluators = {**utt_evaluators, **spk_evaluators}
+
+    ref_evaluator_names = list(REF_EVALUATOR_NAMES)
+    if use_articulatory:
+        ref_evaluator_names.extend(ARTICULATORY_REF_EVALUATOR_NAMES)
+    # Honor --evaluators filter: drop any ref evaluator that build_evaluators
+    # didn't actually instantiate (e.g. p_estoi when only artp/art_nad were
+    # requested). Otherwise run_reference_evaluators KeyError's on the first
+    # missing name and skips ART-NAD entirely.
+    ref_evaluator_names = [n for n in ref_evaluator_names if n in utt_evaluators]
 
     output_file.write("\n--- Evaluator Hashes ---\n")
     for name, evaluator in all_evaluators.items():
         output_file.write(f"  {name}: {get_class_hash(evaluator)}\n")
 
-    non_ref_evaluators = {k: v for k, v in utt_evaluators.items() if k not in REF_EVALUATOR_NAMES}
+    non_ref_evaluators = {k: v for k, v in utt_evaluators.items() if k not in ref_evaluator_names}
 
     audio_cache = {}  # shared across utterance and speaker loops
 
@@ -434,7 +503,7 @@ def evaluate_dataset(dataset_dir, output_file, results_dir=None):
     spk_utt_scores = run_utterance_evaluators(base_dataset, non_ref_evaluators, audio_cache=audio_cache)
 
     output_file.write("\nRunning reference-based utterance evaluation...\n")
-    run_reference_evaluators(dataset_dir, utt_evaluators, spk_utt_scores)
+    run_reference_evaluators(dataset_dir, utt_evaluators, spk_utt_scores, ref_evaluator_names=ref_evaluator_names)
 
     output_file.write("\nRunning speaker-level evaluation...\n")
     run_speaker_evaluators(base_dataset, spk_evaluators, spk_utt_scores, audio_cache=audio_cache)
@@ -456,7 +525,45 @@ def main():
     parser.add_argument("dataset_dirs", nargs="+", help="Dataset directories to evaluate.")
     parser.add_argument("--results-dir", metavar="DIR", default=None,
                         help="Directory to write per-evaluator score CSVs (mirrors dataset structure).")
+    parser.add_argument("--use-articulatory", action="store_true",
+                        help="Also run ART-NAD evaluators backed by the speech-to-EMA "
+                             "model in tools/articulatory. Requires the articulatory_venv "
+                             "to be active; the model + HuBERT load is expensive so this "
+                             "is off by default.")
+    parser.add_argument("--art-inversion-ckpt", metavar="PKL", default=None,
+                        help="Override the ART-NAD inversion model with a "
+                             "locally-trained BiGRU best.pkl (aai/train.py). "
+                             "When omitted, the released checkpoint is used.")
+    parser.add_argument("--art-ssl-kind", metavar="KIND", default="hubert",
+                        choices=["hubert", "w2v10"],
+                        help="SSL backbone for --art-inversion-ckpt: 'hubert' "
+                             "(hubert-large last layer) or 'w2v10' "
+                             "(wav2vec2-large layer 10).")
+    parser.add_argument("--evaluators", metavar="CSV", default=None,
+                        help="Comma-separated allowlist of evaluator names to keep "
+                             "(e.g. 'artp,art_nad,art_nad_aug'). spk2score "
+                             "is always kept. Unselected evaluators are skipped before "
+                             "construction so their model downloads are avoided. "
+                             "When omitted, all evaluators are run.")
     args = parser.parse_args()
+    evaluator_filter = (
+        {x.strip() for x in args.evaluators.split(",") if x.strip()}
+        if args.evaluators else None
+    )
+
+    # Optional: override the ART-NAD inversion backbone with a locally-trained
+    # BiGRU (aai/train.py best.pkl). When set, the shared runner is pre-built
+    # so build_evaluators' get_articulatory_runner() picks it up.
+    if args.art_inversion_ckpt:
+        import pathbench.model_registry as _mr
+        from pathbench.articulatory_runner import ArticulatoryRunner
+        _mr._articulatory_runner = ArticulatoryRunner(
+            repo_path="tools/articulatory",
+            inversion_ckpt=args.art_inversion_ckpt,
+            ssl_kind=args.art_ssl_kind,
+        )
+        print(f"ART-NAD inversion override: {args.art_inversion_ckpt} "
+              f"(ssl_kind={args.art_ssl_kind})")
 
     dataset_name = args.dataset_dirs[0].replace("/", "_")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -477,7 +584,12 @@ def main():
                 print(dataset_dir)
                 print(output_file)
                 print(args.results_dir)
-                result = evaluate_dataset(dataset_dir, output_file, results_dir=args.results_dir)
+                result = evaluate_dataset(
+                    dataset_dir, output_file,
+                    results_dir=args.results_dir,
+                    use_articulatory=args.use_articulatory,
+                    evaluator_filter=evaluator_filter,
+                )
                 if result:
                     all_results[dataset_dir] = result
             except FileNotFoundError as e:

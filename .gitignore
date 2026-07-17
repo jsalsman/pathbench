@@ -1,12 +1,60 @@
 pathbench.egg-info
-pathbench/__pycache__/
+__pycache__/
+*.log
+.claude/
 datasets/neurovoz_clean
+paper/
 tools/venv
+tools/avhubert_venv
+tools/articulatory_venv
+tools/AV-HuBERT-S2S
+tools/articulatory
 tools/*.done
+
+# espeak-ng local source/build trees. The canonical pinned build lives inside
+# the container (pathbench.sif, commit 2ea41210, post-1.52.0). These host-side
+# checkouts are large build artifacts and must never be committed.
+tools/espeak-ng-*/
+espeak-ng/
+
+# AV word-av dirs — kept locally for reference, dropped from the published repo.
+datasets/uaspeech/pathological/word_av_embedded/
+datasets/uaspeech/pathological/word_av_m5/
+
+# Raw recordings — NEVER commit. The pathological datasets are licensed and
+# contain identifiable patient speech. Publishing these would be a data leak.
+data/
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.divx
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.TextGrid
+
+# Binaries — too large, undiff-able, balloon the repo
+*.sif
+*.pt
+*.bin
+*.safetensors
+*.dat
+*.onnx
+*.npy
+*.pkl
+*.arpa
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tgz
 *.out
 comparison.sh
 extract_*.py
 tmp/
+logs/
 measure_distance_bence.py
 test_estoi.py
 outs/
@@ -23,6 +71,9 @@ figure/
 scripts/evaluate_spk2score_nad.py
 scripts/force_align_utterance.py
 scripts/plot_artp_vs_subjective.py
+scripts/eval_art_nad_tv.py
+scripts/visualize_art_nad_tv.py
+feature_terminology.md
 *.sh
 *.tex
 tests/__pycache__/

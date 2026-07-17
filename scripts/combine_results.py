@@ -8,7 +8,7 @@ from scipy.stats import wilcoxon
 # --- CONFIGURATION ---
 FILE_PATTERN = "results_13/*.txt"
 OUTPUT_TEX_FILE = os.environ.get("PB_OUTPUT_TEX", "complex_evaluation_summary_3.tex")
-OUTPUT_CSV_FILE = os.environ.get("PB_OUTPUT_CSV", "results_table.csv")
+OUTPUT_CSV_FILE = os.environ.get("PB_OUTPUT_CSV", "results/results_table.csv")
 DATASETS_ROOT = "datasets"
 
 DATASET_DIR_MAP = {

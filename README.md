@@ -13,7 +13,7 @@ PathBench is a benchmark designed to evaluate pathological speech assessment sys
 Speaker-level Pearson Correlation Coefficients (PCC) results can be found below.
 Currently ArtP is the best reference-based, and DArtP is the best reference-free method.
 
-* **CSV** (canonical, in this repo): [`results_table.csv`](results_table.csv)
+* **CSV** (canonical, in this repo): [`results/results_table.csv`](results/results_table.csv) (RTX 3090) and [`results/results_table_2080ti.csv`](results/results_table_2080ti.csv) (RTX 2080 Ti). The two are the same benchmark on different GPUs; small differences (≤0.01) are due to GPU floating-point non-determinism.
 * **Google docs** [Google Docs](https://docs.google.com/spreadsheets/d/1ri-y_bHPgED3jJLuonChuwpaSP_3ddrx/edit?usp=sharing&ouid=112094007551573667400&rtpof=true&sd=true)
 
 

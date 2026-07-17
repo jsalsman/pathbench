@@ -1,9 +1,14 @@
 import pandas as pd
 import numpy as np
 import glob
+import json
 import os
 import re
 from scipy.stats import wilcoxon
+
+# ART-NAD tract-variable results live outside the results_13 txt files, as JSON
+# written by scripts/eval_art_nad_tv.py (a separate inversion-model pipeline).
+ART_NAD_TV_ROOT = "results_artmodels/art_nad_tv"
 
 # --- CONFIGURATION ---
 FILE_PATTERN = "results_13/*.txt"
@@ -51,7 +56,8 @@ METRIC_ROW_MAP = {
     'nad_control': 'NAD Control',
     'nad_all': 'NAD All',
     'nad_fa_control': 'NAD FA Control',
-    'nad_fa_all': 'NAD'
+    'nad_fa_all': 'NAD',
+    'art_nad_tv_fa_all': 'ART-NAD-TV',
 }
 
 # Multi-lingual support, Explainability columns per metric key
@@ -69,6 +75,7 @@ METRIC_MULTI_EXPL = {
     'artp':                 (r'\cmark*', r'\cmark'),
     'p_estoi_fa_all':       (r'\cmark',  r'\xmark'),
     'nad_fa_all':           (r'\cmark',  r'\xmark'),
+    'art_nad_tv_fa_all':    (r'\cmark',  r'\cmark'),
 }
 
 # Added Praat metrics here so they are considered for "Best Reference-Free" (underlining)
@@ -244,6 +251,54 @@ def parse_txt_file(filepath):
             "Condition": cond
         })
     return data
+
+def parse_art_nad_tv_jsons(root=ART_NAD_TV_ROOT):
+    """Read ART-NAD-TV results (scripts/eval_art_nad_tv.py output) into the same
+    row format as parse_txt_file. Uses the FA-trimmed, all-reference value
+    (``art_nad_tv_fa`` under ``results.all``) to match how NAD is reported
+    (``nad_fa_all``). Values are already |Pearson|. Returns [] if none found."""
+    data = []
+    for fp in glob.glob(os.path.join(root, "**", "art_nad_tv.json"), recursive=True):
+        try:
+            with open(fp) as f:
+                j = json.load(f)
+        except (OSError, ValueError):
+            continue
+        name = str(j.get("protocol", fp)).lower()
+
+        dataset = 'Unknown'
+        for key, val in (('uaspeech', 'UASpeech'), ('neurovoz', 'NeuroVoz'),
+                         ('easycall', 'EasyCall'), ('copas', 'COPAS'),
+                         ('torgo', 'TORGO'), ('mdsc', 'MDSC'),
+                         ('youtube', 'YT'), ('yt', 'YT')):
+            if key in name:
+                dataset = val
+                break
+
+        if 'utterance' in name or 'sentence' in name:
+            dtype = 'Utterance'
+        elif 'command' in name:
+            dtype = 'Command'
+        else:
+            dtype = 'Word'
+
+        if 'unbalanced' in name:
+            cond = 'PU'
+        elif 'balanced' in name:
+            cond = 'PB'
+        elif 'all' in name:
+            cond = 'ALL'
+        else:
+            cond = 'PU'
+
+        val = j.get("results", {}).get("all", {}).get("art_nad_tv_fa")
+        if val is not None:
+            data.append({
+                "MetricKey": "art_nad_tv_fa_all", "Value": float(val),
+                "Dataset": dataset, "Type": dtype, "Condition": cond,
+            })
+    return data
+
 
 def align_signs(df):
     """Align PCC signs so that positive always means 'better / as expected'.
@@ -471,7 +526,7 @@ def generate_latex(df, datasets_root=DATASETS_ROOT):
         ("Reference-Free (Speaker)", ['vsa']),
         ("Reference-Free (Model)", ['double_asr', 'artp_double_asr', 'artp_old']),
         ("Reference-Text", ['per', 'dper', 'artp']),
-        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all']),
+        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all', 'art_nad_tv_fa_all']),
     ]
 
     all_metrics = [m for _, metrics in groups for m in metrics]
@@ -572,7 +627,7 @@ def generate_csv(df):
         ("Reference-Free (Speaker)", ['vsa']),
         ("Reference-Free (Model)", ['double_asr', 'artp_double_asr', 'artp_old']),
         ("Reference-Text", ['per', 'dper', 'artp']),
-        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all']),
+        ("Reference-Audio (Parallel)", ['p_estoi_fa_all', 'nad_fa_all', 'art_nad_tv_fa_all']),
     ]
     all_metrics = [m for _, metrics in groups for m in metrics]
 
@@ -648,6 +703,11 @@ def main():
     all_data = []
     for f in files:
         all_data.extend(parse_txt_file(f))
+
+    tv_data = parse_art_nad_tv_jsons()
+    if tv_data:
+        print(f"Found {len(tv_data)} ART-NAD-TV results.")
+        all_data.extend(tv_data)
 
     if not all_data:
         print("No valid data extracted.")

@@ -30,11 +30,6 @@ from pathbench.asr_evaluators import PEREvaluator, DirectPEREvaluator, DoubleASR
 from pathbench.f0_range_evaluator import StdPitchEvaluator
 from pathbench.reference_evaluator import ESTOIEvaluator
 from pathbench.nad_evaluator import NADEvaluator, TrimmedNADEvaluator
-from pathbench.articulatory_evaluators import (
-    ARTNADEvaluator, TrimmedARTNADEvaluator,
-    ARTNADAugEvaluator, TrimmedARTNADAugEvaluator,
-)
-from pathbench.model_registry import get_articulatory_runner
 from pathbench.articulatory_precision_evaluator import ArticulatoryPrecisionEvaluator, PhoneticConfidenceEvaluator
 from pathbench.speech_rate import PraatSpeechRateEvaluator
 from pathbench.dataset import Dataset
@@ -53,12 +48,7 @@ from pathbench.utils import write_correlation_table
 PARTIAL_COVERAGE_ALLOWLIST = {"spk2age", "wada_snr"}
 
 # Evaluator keys that require reference audio and are run separately.
-# Extended at runtime when --use-articulatory adds art_nad / art_nad_aug.
 REF_EVALUATOR_NAMES = ["p_estoi", "p_estoi_fa", "nad", "nad_fa"]
-ARTICULATORY_REF_EVALUATOR_NAMES = [
-    "art_nad", "art_nad_fa",
-    "art_nad_aug", "art_nad_aug_fa",
-]
 
 # Evaluator types that produce a single score per speaker (not averaged over utterances).
 _SINGLE_SCORE_TYPES = (
@@ -75,10 +65,6 @@ SUMMARY_METRICS = [
     "nad_control", "nad_all", "wada_snr", "spk2age", "vsa", "std_pitch",
     "cpp_fa", "nad_fa_control", "nad_fa_all", "vsa_fa", "std_pitch_fa",
     "praat_speech_rate", "praat_speech_rate_fa",
-    "art_nad_control", "art_nad_all",
-    "art_nad_fa_control", "art_nad_fa_all",
-    "art_nad_aug_control", "art_nad_aug_all",
-    "art_nad_aug_fa_control", "art_nad_aug_fa_all",
 ]
 
 
@@ -108,15 +94,14 @@ def get_class_hash(instance) -> str:
         return "N/A"
 
 
-def build_evaluators(base_dataset, trimmer, use_articulatory: bool = False,
-                     evaluator_filter=None):
+def build_evaluators(base_dataset, trimmer, evaluator_filter=None):
     """Instantiates all utterance- and speaker-level evaluators for a dataset.
 
+    ART-NAD is not built here: the tract-variable evaluators need a runner with
+    a custom TV inversion checkpoint, and are run separately by
+    scripts/eval_art_nad_tv.py.
+
     Args:
-        use_articulatory: if True, also register ART-NAD evaluators backed by
-            the speech-to-EMA model in ``tools/articulatory``. Off by default
-            because the model + HuBERT load is expensive and only the
-            articulatory-venv SLURM job needs them.
         evaluator_filter: optional iterable of evaluator names to keep. When
             provided, evaluators whose name is not in the set are skipped
             entirely (lazy factories — their model downloads and constructor
@@ -155,22 +140,6 @@ def build_evaluators(base_dataset, trimmer, use_articulatory: bool = False,
 
     if base_dataset.spk2age and _keep("spk2age"):
         utt_evaluators["spk2age"] = Spk2AgeEvaluator(base_dataset.spk2age, base_dataset.utt2spk)
-
-    art_runner = None
-    if use_articulatory:
-        # One runner shared across all articulatory evaluators so the HuBERT
-        # encoder + BiGRU inversion model are loaded exactly once.
-        art_names = ("art_nad", "art_nad_fa", "art_nad_aug", "art_nad_aug_fa")
-        if any(_keep(n) for n in art_names):
-            art_runner = get_articulatory_runner()
-            if _keep("art_nad"):
-                utt_evaluators["art_nad"] = ARTNADEvaluator(runner=art_runner)
-            if _keep("art_nad_fa"):
-                utt_evaluators["art_nad_fa"] = TrimmedARTNADEvaluator(runner=art_runner, trimmer=trimmer)
-            if _keep("art_nad_aug"):
-                utt_evaluators["art_nad_aug"] = ARTNADAugEvaluator(runner=art_runner)
-            if _keep("art_nad_aug_fa"):
-                utt_evaluators["art_nad_aug_fa"] = TrimmedARTNADAugEvaluator(runner=art_runner, trimmer=trimmer)
 
     spk_factories = [
         ("vsa",    lambda: VSAEvaluator()),
@@ -253,9 +222,7 @@ def run_reference_evaluators(dataset_dir, utt_evaluators, spk_utt_scores, ref_ev
     Updates spk_utt_scores in place.
     Utterances without reference audio are skipped.
 
-    ``ref_evaluator_names`` defaults to ``REF_EVALUATOR_NAMES``; the
-    ``--use-articulatory`` caller passes an extended list that includes
-    ``art_nad`` / ``art_nad_aug``.
+    ``ref_evaluator_names`` defaults to ``REF_EVALUATOR_NAMES``.
     """
     if ref_evaluator_names is None:
         ref_evaluator_names = REF_EVALUATOR_NAMES
@@ -457,7 +424,7 @@ def write_score_csvs(score_dir, agg_spk_metrics, output_file):
         output_file.write(f"  Wrote {csv_path} ({len(spk_scores)} speakers)\n")
 
 
-def evaluate_dataset(dataset_dir, output_file, results_dir=None, use_articulatory: bool = False,
+def evaluate_dataset(dataset_dir, output_file, results_dir=None,
                      evaluator_filter=None):
     """Runs the full evaluation pipeline for a single dataset directory."""
     output_file.write(f"Loading dataset: {dataset_dir}\n")
@@ -476,19 +443,14 @@ def evaluate_dataset(dataset_dir, output_file, results_dir=None, use_articulator
 
     trimmer = FATrimmer()
     utt_evaluators, spk_evaluators = build_evaluators(
-        base_dataset, trimmer,
-        use_articulatory=use_articulatory,
-        evaluator_filter=evaluator_filter,
+        base_dataset, trimmer, evaluator_filter=evaluator_filter,
     )
     all_evaluators = {**utt_evaluators, **spk_evaluators}
 
     ref_evaluator_names = list(REF_EVALUATOR_NAMES)
-    if use_articulatory:
-        ref_evaluator_names.extend(ARTICULATORY_REF_EVALUATOR_NAMES)
     # Honor --evaluators filter: drop any ref evaluator that build_evaluators
-    # didn't actually instantiate (e.g. p_estoi when only artp/art_nad were
-    # requested). Otherwise run_reference_evaluators KeyError's on the first
-    # missing name and skips ART-NAD entirely.
+    # didn't actually instantiate (e.g. p_estoi when only artp was requested).
+    # Otherwise run_reference_evaluators KeyError's on the first missing name.
     ref_evaluator_names = [n for n in ref_evaluator_names if n in utt_evaluators]
 
     output_file.write("\n--- Evaluator Hashes ---\n")
@@ -525,23 +487,9 @@ def main():
     parser.add_argument("dataset_dirs", nargs="+", help="Dataset directories to evaluate.")
     parser.add_argument("--results-dir", metavar="DIR", default=None,
                         help="Directory to write per-evaluator score CSVs (mirrors dataset structure).")
-    parser.add_argument("--use-articulatory", action="store_true",
-                        help="Also run ART-NAD evaluators backed by the speech-to-EMA "
-                             "model in tools/articulatory. Requires the articulatory_venv "
-                             "to be active; the model + HuBERT load is expensive so this "
-                             "is off by default.")
-    parser.add_argument("--art-inversion-ckpt", metavar="PKL", default=None,
-                        help="Override the ART-NAD inversion model with a "
-                             "locally-trained BiGRU best.pkl (aai/train.py). "
-                             "When omitted, the released checkpoint is used.")
-    parser.add_argument("--art-ssl-kind", metavar="KIND", default="hubert",
-                        choices=["hubert", "w2v10"],
-                        help="SSL backbone for --art-inversion-ckpt: 'hubert' "
-                             "(hubert-large last layer) or 'w2v10' "
-                             "(wav2vec2-large layer 10).")
     parser.add_argument("--evaluators", metavar="CSV", default=None,
                         help="Comma-separated allowlist of evaluator names to keep "
-                             "(e.g. 'artp,art_nad,art_nad_aug'). spk2score "
+                             "(e.g. 'artp,per,nad_fa'). spk2score "
                              "is always kept. Unselected evaluators are skipped before "
                              "construction so their model downloads are avoided. "
                              "When omitted, all evaluators are run.")
@@ -550,20 +498,6 @@ def main():
         {x.strip() for x in args.evaluators.split(",") if x.strip()}
         if args.evaluators else None
     )
-
-    # Optional: override the ART-NAD inversion backbone with a locally-trained
-    # BiGRU (aai/train.py best.pkl). When set, the shared runner is pre-built
-    # so build_evaluators' get_articulatory_runner() picks it up.
-    if args.art_inversion_ckpt:
-        import pathbench.model_registry as _mr
-        from pathbench.articulatory_runner import ArticulatoryRunner
-        _mr._articulatory_runner = ArticulatoryRunner(
-            repo_path="tools/articulatory",
-            inversion_ckpt=args.art_inversion_ckpt,
-            ssl_kind=args.art_ssl_kind,
-        )
-        print(f"ART-NAD inversion override: {args.art_inversion_ckpt} "
-              f"(ssl_kind={args.art_ssl_kind})")
 
     dataset_name = args.dataset_dirs[0].replace("/", "_")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -587,7 +521,6 @@ def main():
                 result = evaluate_dataset(
                     dataset_dir, output_file,
                     results_dir=args.results_dir,
-                    use_articulatory=args.use_articulatory,
                     evaluator_filter=evaluator_filter,
                 )
                 if result:

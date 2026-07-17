@@ -145,9 +145,9 @@ class _ARTBaseEvaluator(ReferenceAudioEvaluator):
         self._feature_cache: dict = {}
 
     def _feats(self, audio):
-        """Raw articulatory trajectory for one waveform. Default EMA; TV
-        subclasses override to return quasi-tract-variable trajectories."""
-        return self.runner.extract_ema(audio)
+        """Tract-variable trajectory for one waveform, from the TV inversion
+        checkpoint (requires a runner built with a custom TV checkpoint)."""
+        return self.runner.extract_tv(audio)
 
     def _get_features(self, audio_path, start_time, end_time):
         cache_key = (audio_path, start_time, end_time)
@@ -214,18 +214,11 @@ class _ARTBaseEvaluator(ReferenceAudioEvaluator):
         return np.nanmean(distances) if distances else None
 
 
-class ARTNADEvaluator(_ARTBaseEvaluator):
-    """NAD on articulatory features: joint 12-D DTW, mean across references."""
-
-    _dtw_fn = staticmethod(_dtw_joint)
-
-
-class ARTNADTVEvaluator(ARTNADEvaluator):
+class ARTNADTVEvaluator(_ARTBaseEvaluator):
     """ART-NAD on tract variables: joint DTW over the per-utterance z-scored
     quasi-TV trajectory from the TV inversion model."""
 
-    def _feats(self, audio):
-        return self.runner.extract_tv(audio)
+    _dtw_fn = staticmethod(_dtw_joint)
 
 
 class ARTNADTVRawEvaluator(ARTNADTVEvaluator):
@@ -235,11 +228,9 @@ class ARTNADTVRawEvaluator(ARTNADTVEvaluator):
     _norm_fn = staticmethod(_identity_norm)
 
 
-class ARTNADAugEvaluator(_ARTBaseEvaluator):
-    """ART-NAD augmented with prosodic channels: joint 14-D DTW over
-    (12 EMA + log-F0 + log-RMS), all z-scored per channel. Tests whether the
-    ART-vs-NAD gap is closed by adding the prosodic information that
-    wav2vec2/HuBERT features capture implicitly but EMA does not."""
+class ARTNADTVAugEvaluator(_ARTBaseEvaluator):
+    """ART-NAD on tract variables augmented with prosodic channels: joint DTW
+    over (TV + log-F0 + log-RMS), z-scored per channel."""
 
     _dtw_fn = staticmethod(_dtw_joint)
     _norm_fn = staticmethod(_zscore_per_channel)
@@ -304,9 +295,9 @@ class _TrimmedARTBaseEvaluator(ReferenceTxtAndAudioEvaluator):
         self._feature_cache: dict = {}
 
     def _feats(self, audio):
-        """Raw articulatory trajectory for one waveform. Default EMA; TV
-        subclasses override to return quasi-tract-variable trajectories."""
-        return self.runner.extract_ema(audio)
+        """Tract-variable trajectory for one waveform, from the TV inversion
+        checkpoint (requires a runner built with a custom TV checkpoint)."""
+        return self.runner.extract_tv(audio)
 
     def _get_features(self, audio_path, transcription, language,
                       start_time, end_time, use_trimming):
@@ -420,19 +411,11 @@ class _TrimmedARTBaseEvaluator(ReferenceTxtAndAudioEvaluator):
         return np.nanmean(distances) if distances else None
 
 
-class TrimmedARTNADEvaluator(_TrimmedARTBaseEvaluator):
-    """ART-NAD with forced-alignment VAD (joint 12-D DTW). Direct analog of
-    :class:`pathbench.nad_evaluator.TrimmedNADEvaluator`."""
-
-    _dtw_fn = staticmethod(_dtw_joint)
-
-
-class TrimmedARTNADTVEvaluator(TrimmedARTNADEvaluator):
+class TrimmedARTNADTVEvaluator(_TrimmedARTBaseEvaluator):
     """ART-NAD-FA on tract variables: joint DTW over per-utterance z-scored
     quasi-TV trajectories, with forced-alignment silence trimming."""
 
-    def _feats(self, audio):
-        return self.runner.extract_tv(audio)
+    _dtw_fn = staticmethod(_dtw_joint)
 
 
 class TrimmedARTNADTVRawEvaluator(TrimmedARTNADTVEvaluator):
@@ -442,17 +425,9 @@ class TrimmedARTNADTVRawEvaluator(TrimmedARTNADTVEvaluator):
     _norm_fn = staticmethod(_identity_norm)
 
 
-class ARTNADTVAugEvaluator(ARTNADAugEvaluator):
-    """ART-NAD-Aug on tract variables: joint DTW over per-utterance z-scored
-    (quasi-TV + log-F0 + log-RMS)."""
-
-    def _feats(self, audio):
-        return self.runner.extract_tv(audio)
-
-
-class TrimmedARTNADAugEvaluator(_TrimmedARTBaseEvaluator):
-    """ART-NAD-Aug (EMA + log-F0 + log-RMS, joint DTW) with forced-alignment
-    VAD trimming. Same two-pass fallback as :class:`TrimmedARTNADEvaluator`."""
+class TrimmedARTNADTVAugEvaluator(_TrimmedARTBaseEvaluator):
+    """ART-NAD-Aug-FA on tract variables: joint DTW over (TV + log-F0 +
+    log-RMS), z-scored, with forced-alignment silence trimming."""
 
     _dtw_fn = staticmethod(_dtw_joint)
     _norm_fn = staticmethod(_zscore_per_channel)
@@ -497,14 +472,6 @@ class TrimmedARTNADAugEvaluator(_TrimmedARTBaseEvaluator):
             result = (None, f"Failed to process {audio_path}: {e}")
             self._feature_cache[cache_key] = result
             return result
-
-
-class TrimmedARTNADTVAugEvaluator(TrimmedARTNADAugEvaluator):
-    """ART-NAD-Aug-FA on tract variables: joint DTW over per-utterance z-scored
-    (quasi-TV + log-F0 + log-RMS), with forced-alignment silence trimming."""
-
-    def _feats(self, audio):
-        return self.runner.extract_tv(audio)
 
 
 class TrimmedARTNADTVRawAugCEvaluator(TrimmedARTNADTVAugEvaluator):

@@ -12,7 +12,6 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Model, Wav2Vec2Processor
 
 _ctc_models = {}   # model_id -> (processor, model, device)
 _feat_models = {}  # (model_id, layer) -> featurizer_fn
-_articulatory_runner = None  # singleton ArticulatoryRunner instance
 
 
 def get_ctc_model(model_id: str):
@@ -54,23 +53,3 @@ def get_featurizer(model_id: str, layer: int):
         _feat_models[key] = _featurize
         print(f"Featurizer '{model_id}' (layer {layer}) loaded on {device}.")
     return _feat_models[key]
-
-
-def get_articulatory_runner(repo_path: str = "tools/articulatory",
-                            checkpoint_subdir: str = None,
-                            device: str = None):
-    """Return a shared :class:`ArticulatoryRunner` (one BiGRU + HuBERT load
-    per process). The runner is lazy: weights are loaded only on the first
-    ``extract_ema`` call, so importing this module does not pull in the
-    articulatory venv's deps."""
-    global _articulatory_runner
-    if _articulatory_runner is None:
-        from pathbench.articulatory_runner import (
-            ArticulatoryRunner, DEFAULT_CHECKPOINT_SUBDIR,
-        )
-        _articulatory_runner = ArticulatoryRunner(
-            repo_path=repo_path,
-            checkpoint_subdir=checkpoint_subdir or DEFAULT_CHECKPOINT_SUBDIR,
-            device=device,
-        )
-    return _articulatory_runner

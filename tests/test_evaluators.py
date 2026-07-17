@@ -74,12 +74,13 @@ EXPECTED_ARTICULATORY_PRECISION_OLD = 0.5374   # places=4; facebook/wav2vec2-xls
 EXPECTED_ARTICULATORY_PRECISION     = 0.0695   # places=4; forced-alignment AP
 EXPECTED_ARTP_DOUBLE_ASR            = 0.4405   # places=4; double-pass ASR + phonetic model + LM
 EXPECTED_FA_PESTOI                  = -0.0761  # places=4; forced-alignment P-ESTOI
-# ART-NAD (quasi-EMA DTW) — released hprc speech-to-EMA inversion checkpoint.
+# ART-NAD on tract variables — needs a TV inversion checkpoint (not bundled).
 # Bootstrapped in the articulatory venv; DTW over a BiGRU output, so asserted
 # to 3 places to tolerate minor cross-device float variance.
-EXPECTED_ARTNAD                     = 3.4474   # places=3; joint 12-D quasi-EMA DTW
-EXPECTED_ARTNAD_TRIMMED             = 3.4474   # places=3; no trimmer → untrimmed fallback
-EXPECTED_ARTNAD_AUG                 = 3.7277   # places=3; quasi-EMA + log-F0 + log-RMS
+EXPECTED_ARTNAD_TV                  = 3.4631   # places=3; z-scored TV, joint DTW
+EXPECTED_ARTNAD_TV_RAW              = 0.5644   # places=3; raw (un-normalized) TV
+EXPECTED_ARTNAD_TV_RAW_FA           = 0.5644   # places=3; raw TV + FA trim (paper: ART-NAD-FA);
+                                               # no trimmer here → untrimmed fallback, so == RAW
 
 
 def file_sha256(path: str) -> str:
@@ -91,25 +92,36 @@ def file_sha256(path: str) -> str:
     return h.hexdigest()
 
 
-# ART-NAD needs the articulatory venv (h5py) and the released speech-to-EMA
-# inversion checkpoint, both of which live outside the default test venv. These
-# tests skip unless run in that environment (mirrors the LM-gated ArtP test).
-_ARTNAD_CKPT = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "tools", "articulatory", "checkpoints",
-    "hprc_no_m1f2_h2emaph_gru_joint_nogan_model", "best_mel_ckpt.pkl",
-)
+# ART-NAD (tract variables) needs the articulatory venv (h5py) *and* a TV
+# inversion checkpoint, which is distributed separately (see README) rather than
+# bundled. These tests skip unless both are present (mirrors the LM-gated ArtP
+# test). Point PATHBENCH_TV_CKPT at the checkpoint to enable them.
+_TV_CKPT = os.environ.get("PATHBENCH_TV_CKPT", "")
 
 
-def _articulatory_available() -> bool:
+def _tv_available() -> bool:
+    if not _TV_CKPT:
+        return False
     try:
         import h5py  # noqa: F401
     except Exception:
         return False
-    return os.path.exists(_ARTNAD_CKPT)
+    return os.path.exists(_TV_CKPT)
 
 
-_ARTICULATORY_AVAILABLE = _articulatory_available()
+_TV_AVAILABLE = _tv_available()
+_tv_runner_cache = []
+
+
+def _tv_runner():
+    """Shared ArticulatoryRunner on the TV inversion checkpoint (loaded once)."""
+    if not _tv_runner_cache:
+        from pathbench.articulatory_runner import ArticulatoryRunner
+        _tv_runner_cache.append(ArticulatoryRunner(
+            repo_path="tools/articulatory", inversion_ckpt=_TV_CKPT,
+            ssl_kind="w2v10",
+        ))
+    return _tv_runner_cache[0]
 
 
 # ---------------------------------------------------------------------------
@@ -343,43 +355,41 @@ class TestEvaluatorMethods(unittest.TestCase):
         self._assert_score("ForcedAlignmentPESTOI", score, EXPECTED_FA_PESTOI, places=4)
 
     # ------------------------------------------------------------------
-    # Articulatory (ART-NAD) evaluators — quasi-EMA from the speech-to-EMA
-    # inversion model. Require the articulatory venv (h5py) + inversion
-    # checkpoint, so they skip in the default test venv.
+    # ART-NAD on tract variables. Require the articulatory venv (h5py) and a
+    # TV inversion checkpoint (distributed separately), so they skip in the
+    # default test venv. Set PATHBENCH_TV_CKPT to enable.
     # ------------------------------------------------------------------
 
-    @unittest.skipUnless(_ARTICULATORY_AVAILABLE,
-                         "articulatory venv (h5py) / inversion checkpoint not available")
-    def test_artnad(self):
-        """ART-NAD (joint 12-D quasi-EMA DTW): accented BLUE vs typical-English controls."""
-        from pathbench.model_registry import get_articulatory_runner
-        from pathbench.articulatory_evaluators import ARTNADEvaluator
-        score = ARTNADEvaluator(runner=get_articulatory_runner()).score(
+    @unittest.skipUnless(_TV_AVAILABLE,
+                         "articulatory venv (h5py) / TV inversion checkpoint not available")
+    def test_artnad_tv(self):
+        """ART-NAD-TV (per-utterance z-scored tract variables, joint DTW)."""
+        from pathbench.articulatory_evaluators import ARTNADTVEvaluator
+        score = ARTNADTVEvaluator(runner=_tv_runner()).score(
             "test", BLUE_ACCENTED, BLUE_CONTROLS, start_time=0.0, end_time=-1.0
         )
-        self._assert_score("ARTNAD", score, EXPECTED_ARTNAD, places=3)
+        self._assert_score("ARTNAD_TV", score, EXPECTED_ARTNAD_TV, places=3)
 
-    @unittest.skipUnless(_ARTICULATORY_AVAILABLE,
-                         "articulatory venv (h5py) / inversion checkpoint not available")
-    def test_artnad_trimmed(self):
-        """TrimmedART-NAD: accented BLUE vs controls (no trimmer → untrimmed fallback)."""
-        from pathbench.model_registry import get_articulatory_runner
-        from pathbench.articulatory_evaluators import TrimmedARTNADEvaluator
-        score = TrimmedARTNADEvaluator(runner=get_articulatory_runner()).score(
+    @unittest.skipUnless(_TV_AVAILABLE,
+                         "articulatory venv (h5py) / TV inversion checkpoint not available")
+    def test_artnad_tv_raw(self):
+        """ART-NAD-TV on raw (un-normalized) tract variables, joint DTW."""
+        from pathbench.articulatory_evaluators import ARTNADTVRawEvaluator
+        score = ARTNADTVRawEvaluator(runner=_tv_runner()).score(
+            "test", BLUE_ACCENTED, BLUE_CONTROLS, start_time=0.0, end_time=-1.0
+        )
+        self._assert_score("ARTNAD_TV_Raw", score, EXPECTED_ARTNAD_TV_RAW, places=3)
+
+    @unittest.skipUnless(_TV_AVAILABLE,
+                         "articulatory venv (h5py) / TV inversion checkpoint not available")
+    def test_artnad_tv_raw_fa(self):
+        """ART-NAD-FA: raw tract variables + forced-alignment trimming. This is
+        the variant reported in the paper (no trimmer here → untrimmed fallback)."""
+        from pathbench.articulatory_evaluators import TrimmedARTNADTVRawEvaluator
+        score = TrimmedARTNADTVRawEvaluator(runner=_tv_runner()).score(
             "test", BLUE_ACCENTED, "blue", "en", BLUE_CONTROLS
         )
-        self._assert_score("ARTNAD_Trimmed", score, EXPECTED_ARTNAD_TRIMMED, places=3)
-
-    @unittest.skipUnless(_ARTICULATORY_AVAILABLE,
-                         "articulatory venv (h5py) / inversion checkpoint not available")
-    def test_artnad_aug(self):
-        """ART-NAD-Aug (quasi-EMA + log-F0 + log-RMS DTW): accented BLUE vs controls."""
-        from pathbench.model_registry import get_articulatory_runner
-        from pathbench.articulatory_evaluators import ARTNADAugEvaluator
-        score = ARTNADAugEvaluator(runner=get_articulatory_runner()).score(
-            "test", BLUE_ACCENTED, BLUE_CONTROLS, start_time=0.0, end_time=-1.0
-        )
-        self._assert_score("ARTNAD_Aug", score, EXPECTED_ARTNAD_AUG, places=3)
+        self._assert_score("ARTNAD_TV_Raw_FA", score, EXPECTED_ARTNAD_TV_RAW_FA, places=3)
 
 
 # ---------------------------------------------------------------------------

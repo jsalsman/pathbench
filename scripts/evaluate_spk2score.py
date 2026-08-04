@@ -31,6 +31,7 @@ from pathbench.f0_range_evaluator import StdPitchEvaluator
 from pathbench.reference_evaluator import ESTOIEvaluator
 from pathbench.nad_evaluator import NADEvaluator, TrimmedNADEvaluator
 from pathbench.articulatory_precision_evaluator import ArticulatoryPrecisionEvaluator, PhoneticConfidenceEvaluator
+from pathbench.articulatory_evaluators import ARTNADTVRawEvaluator, TrimmedARTNADTVRawEvaluator
 from pathbench.speech_rate import PraatSpeechRateEvaluator
 from pathbench.dataset import Dataset
 from pathbench.p_estoi_evaluator import ForcedAlignmentPESTOIEvaluator
@@ -47,8 +48,14 @@ from pathbench.utils import write_correlation_table
 # wada_snr: can fail for some speakers.
 PARTIAL_COVERAGE_ALLOWLIST = {"spk2age", "wada_snr"}
 
+# Released tract-variable (Seneviratne TVs) BiGRU inversion checkpoint driving
+# ART-NAD, trained on wav2vec2-large layer 10 (``ssl_kind="w2v10"``). This is the
+# checkpoint behind the published ART-NAD-FA = 0.71 row (see run_tv_raw.sh).
+DEFAULT_TV_CKPT = "/nas02/homes/bence22-1000065/projects/articulatory_inversion/exp/tv_bigru_w2v10_sen/best.pkl"
+
 # Evaluator keys that require reference audio and are run separately.
-REF_EVALUATOR_NAMES = ["p_estoi", "p_estoi_fa", "nad", "nad_fa"]
+REF_EVALUATOR_NAMES = ["p_estoi", "p_estoi_fa", "nad", "nad_fa",
+                       "art_nad_tv_raw", "art_nad_tv_raw_fa"]
 
 # Evaluator types that produce a single score per speaker (not averaged over utterances).
 _SINGLE_SCORE_TYPES = (
@@ -65,6 +72,8 @@ SUMMARY_METRICS = [
     "nad_control", "nad_all", "wada_snr", "spk2age", "vsa", "std_pitch",
     "cpp_fa", "nad_fa_control", "nad_fa_all", "vsa_fa", "std_pitch_fa",
     "praat_speech_rate", "praat_speech_rate_fa",
+    "art_nad_tv_raw_control", "art_nad_tv_raw_all",
+    "art_nad_tv_raw_fa_control", "art_nad_tv_raw_fa_all",
 ]
 
 
@@ -97,9 +106,11 @@ def get_class_hash(instance) -> str:
 def build_evaluators(base_dataset, trimmer, evaluator_filter=None):
     """Instantiates all utterance- and speaker-level evaluators for a dataset.
 
-    ART-NAD is not built here: the tract-variable evaluators need a runner with
-    a custom TV inversion checkpoint, and are run separately by
-    scripts/eval_art_nad_tv.py.
+    The raw tract-variable ART-NAD evaluators (``art_nad_tv_raw`` and its
+    forced-alignment-trimmed ``_fa`` form) are built here too, sharing one
+    :class:`ArticulatoryRunner` on the default TV inversion checkpoint
+    (:data:`DEFAULT_TV_CKPT`). The runner is constructed lazily, so runs that
+    filter ART-NAD out never pay its model-load cost.
 
     Args:
         evaluator_filter: optional iterable of evaluator names to keep. When
@@ -115,6 +126,18 @@ def build_evaluators(base_dataset, trimmer, evaluator_filter=None):
     def _keep(name: str) -> bool:
         return keep is None or name == "spk2score" or name in keep
 
+    # The two raw-TV ART-NAD evaluators share a single runner (wav2vec2-large
+    # layer 10 + BiGRU TV inversion). Built once, on first use, so it is only
+    # loaded when at least one ART-NAD evaluator is kept.
+    _art_runner = []
+    def _art_tv_runner():
+        if not _art_runner:
+            from pathbench.articulatory_runner import ArticulatoryRunner
+            _art_runner.append(ArticulatoryRunner(
+                repo_path="tools/articulatory",
+                inversion_ckpt=DEFAULT_TV_CKPT, ssl_kind="w2v10"))
+        return _art_runner[0]
+
     # Lazy factories so models for unselected evaluators are never loaded.
     utt_factories = [
         ("spk2score",            lambda: Spk2ScoreEvaluator(base_dataset.spk2score, base_dataset.utt2spk)),
@@ -128,10 +151,12 @@ def build_evaluators(base_dataset, trimmer, evaluator_filter=None):
         ("p_estoi",              lambda: ESTOIEvaluator(normalization_method="RMS", centroid_ind=0, frame_deletion=True)),
         ("p_estoi_fa",           lambda: ForcedAlignmentPESTOIEvaluator()),
         ("nad",                  lambda: NADEvaluator()),
+        ("art_nad_tv_raw",       lambda: ARTNADTVRawEvaluator(runner=_art_tv_runner())),
         ("wada_snr",             lambda: WadaSnrEvaluator()),
         ("std_pitch",            lambda: StdPitchEvaluator()),
         ("cpp_fa",               lambda: TrimmedReferenceFreeEvaluator(inner=CPPEvaluator(), trimmer=trimmer)),
         ("nad_fa",               lambda: TrimmedNADEvaluator(trimmer=trimmer)),
+        ("art_nad_tv_raw_fa",    lambda: TrimmedARTNADTVRawEvaluator(runner=_art_tv_runner(), trimmer=trimmer)),
         ("std_pitch_fa",         lambda: TrimmedReferenceFreeEvaluator(inner=StdPitchEvaluator(), trimmer=trimmer)),
         ("praat_speech_rate",    lambda: PraatSpeechRateEvaluator()),
         ("praat_speech_rate_fa", lambda: TrimmedReferenceFreeEvaluator(inner=PraatSpeechRateEvaluator(), trimmer=trimmer)),

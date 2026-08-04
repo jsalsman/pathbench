@@ -18,18 +18,27 @@ checkpoint and the last-layer hidden states are the relevant signal):
 The 12 channels are anatomical (x, y) coordinates for, in order: lower
 incisor, upper lip, lower lip, tongue tip, tongue body, tongue dorsum.
 
-Heavy upstream imports (``articulatory.utils.load_model`` and friends) and
-the HuggingFace ``HubertModel`` are deferred to :meth:`load` so this module
-imports cleanly in environments without the articulatory venv (static
-analysis, audio-only evaluations).
+The ``articulatory.*`` code the BiGRU pipeline needs (``load_model``,
+``BiGRU``, and the handful of layers they import) is vendored in-repo under
+``pathbench/third_party/articulatory`` — a trimmed copy that drops the
+upstream vocoders (HiFi-GAN, MelGAN, ...) and ESPnet nets PathBench never
+uses. Those imports plus the HuggingFace ``HubertModel`` are deferred to
+:meth:`load` so this module imports cleanly for static analysis and
+audio-only evaluations.
 """
-import os
 import sys
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
+
+
+# Vendored minimal ``articulatory`` package lives here. Putting this dir on
+# ``sys.path`` lets the upstream-style ``import articulatory.*`` in the vendored
+# code (and in :meth:`load`) resolve without the full external clone under
+# ``tools/articulatory``.
+_VENDOR_ROOT = Path(__file__).resolve().parent / "third_party"
 
 
 # Released checkpoint name; the speech-to-EMA Google Drive folder unpacks to
@@ -57,9 +66,10 @@ class ArticulatoryRunner:
                  device: Optional[str] = None,
                  inversion_ckpt: Optional[str] = None,
                  ssl_kind: str = "hubert"):
-        # ``repo_path`` doubles as: (a) the dir added to sys.path so the
-        # ``articulatory.*`` package imports resolve, and (b) the parent of
-        # ``checkpoints/`` where the released BiGRU weights + config live.
+        # ``repo_path`` is the parent of ``checkpoints/`` where the released
+        # BiGRU weights + config live (e.g. ``tools/articulatory``). The
+        # ``articulatory.*`` code itself is vendored in-repo (see
+        # ``_VENDOR_ROOT``), so this no longer needs to be an importable clone.
         self.repo = Path(repo_path).resolve()
         self.checkpoint_dir = self.repo / checkpoint_subdir
         self.hubert_id = hubert_id
@@ -90,8 +100,8 @@ class ArticulatoryRunner:
         if self._inv_model is not None:
             return
 
-        if str(self.repo) not in sys.path:
-            sys.path.insert(0, str(self.repo))
+        if str(_VENDOR_ROOT) not in sys.path:
+            sys.path.insert(0, str(_VENDOR_ROOT))
 
         if self._custom:
             self._load_custom()

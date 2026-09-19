@@ -41,12 +41,14 @@ class CommandError(RuntimeError):
         self.returncode = returncode
 
 
-def run(command: list[str], description: str) -> None:
+def run(
+    command: list[str], description: str, *, cwd: Path | None = None
+) -> None:
     """Run a visible command and turn a nonzero status into a useful error."""
     print(f"\n==> {description}", flush=True)
     print("+ " + " ".join(command), flush=True)
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, cwd=cwd)
     except subprocess.CalledProcessError as error:
         raise CommandError(
             f"{description} failed with exit status {error.returncode}. "
@@ -184,7 +186,7 @@ def main() -> int:
             str(venv_python), "-m", "pytest",
             "tests/test_evaluators.py::TestEvaluatorMethods::test_articulatory_precision",
             "tests/test_evaluators.py::TestEvaluatorMethods::test_artp_double_asr", "-v",
-        ], "Running the ArtP and DArtP smoke tests")
+        ], "Running the ArtP and DArtP smoke tests", cwd=REPO_ROOT)
     except CommandError as error:
         print(f"\nError: {error}", file=sys.stderr)
         return error.returncode

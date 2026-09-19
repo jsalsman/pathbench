@@ -167,23 +167,34 @@ espeak_ng_marker=/usr/local/share/pathbench/espeak-ng-commit
 if ! command -v espeak-ng >/dev/null \
     || [[ ! -r "$espeak_ng_marker" ]] \
     || [[ "$(cat "$espeak_ng_marker")" != "$espeak_ng_commit" ]]; then
-  test -d /tmp/espeak-ng/.git \
-    || git clone https://github.com/espeak-ng/espeak-ng.git /tmp/espeak-ng
-  git -C /tmp/espeak-ng fetch origin "$espeak_ng_commit"
-  git -C /tmp/espeak-ng checkout --detach "$espeak_ng_commit"
-  cmake -S /tmp/espeak-ng -B /tmp/espeak-ng/build \
-    -DUSE_ASYNC=OFF -DBUILD_SHARED_LIBS=ON
-  cmake --build /tmp/espeak-ng/build -j"$(nproc)"
-  sudo cmake --install /tmp/espeak-ng/build
-  sudo ldconfig
-  sudo install -d "$(dirname "$espeak_ng_marker")"
-  printf '%s\n' "$espeak_ng_commit" \
-    | sudo tee "$espeak_ng_marker" >/dev/null
+  if { test -d /tmp/espeak-ng/.git \
+      || git clone https://github.com/espeak-ng/espeak-ng.git /tmp/espeak-ng; } \
+      && git -C /tmp/espeak-ng fetch origin "$espeak_ng_commit" \
+      && git -C /tmp/espeak-ng checkout --detach "$espeak_ng_commit" \
+      && cmake -S /tmp/espeak-ng -B /tmp/espeak-ng/build \
+        -DUSE_ASYNC=OFF -DBUILD_SHARED_LIBS=ON \
+      && cmake --build /tmp/espeak-ng/build -j"$(nproc)" \
+      && sudo cmake --install /tmp/espeak-ng/build \
+      && sudo ldconfig \
+      && sudo install -d "$(dirname "$espeak_ng_marker")"; then
+    printf '%s\n' "$espeak_ng_commit" \
+      | sudo tee "$espeak_ng_marker" >/dev/null
+  else
+    echo "Failed to install pinned espeak-ng; commit marker was not written." >&2
+    exit 1
+  fi
 fi
 
-# 3. Clone only if necessary, then install/verify CUDA dependencies and test.
-test -d pathbench/.git || git clone https://github.com/karkirowle/pathbench.git
-cd pathbench
+# 3. Reuse the current checkout, or clone to a stable absolute destination.
+if pathbench_root=$(git rev-parse --show-toplevel 2>/dev/null) \
+    && test -f "$pathbench_root/tools/test_gpu_predictors.py"; then
+  : # Already anywhere inside a PathBench checkout.
+else
+  pathbench_root=${PATHBENCH_ROOT:-"$PWD/pathbench"}
+  test -d "$pathbench_root/.git" \
+    || git clone https://github.com/karkirowle/pathbench.git "$pathbench_root"
+fi
+cd "$pathbench_root"
 python3 tools/test_gpu_predictors.py
 ```
 

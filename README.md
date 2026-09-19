@@ -144,7 +144,7 @@ We are continuously trying to make the installation easier for your use case.
 ### Complete GPU installation (install missing components only)
 
 The following Ubuntu procedure is safe to re-run: it installs only absent apt
-packages, builds the pinned `espeak-ng` only when it is not already available,
+packages, builds the pinned `espeak-ng` unless its commit marker matches,
 clones PathBench only when the checkout is absent, and lets the GPU helper reuse
 an existing virtual environment and matching Python packages.
 
@@ -161,17 +161,24 @@ if ((${#missing[@]})); then
   sudo apt-get install -y "${missing[@]}"
 fi
 
-# 2. Build the reproducible phonemizer backend only when it is absent.
-if ! command -v espeak-ng >/dev/null; then
+# 2. Build the reproducible phonemizer backend unless the pinned commit is installed.
+espeak_ng_commit=2ea41210
+espeak_ng_marker=/usr/local/share/pathbench/espeak-ng-commit
+if ! command -v espeak-ng >/dev/null \
+    || [[ ! -r "$espeak_ng_marker" ]] \
+    || [[ "$(cat "$espeak_ng_marker")" != "$espeak_ng_commit" ]]; then
   test -d /tmp/espeak-ng/.git \
     || git clone https://github.com/espeak-ng/espeak-ng.git /tmp/espeak-ng
-  git -C /tmp/espeak-ng fetch origin 2ea41210
-  git -C /tmp/espeak-ng checkout 2ea41210
+  git -C /tmp/espeak-ng fetch origin "$espeak_ng_commit"
+  git -C /tmp/espeak-ng checkout --detach "$espeak_ng_commit"
   cmake -S /tmp/espeak-ng -B /tmp/espeak-ng/build \
     -DUSE_ASYNC=OFF -DBUILD_SHARED_LIBS=ON
   cmake --build /tmp/espeak-ng/build -j"$(nproc)"
   sudo cmake --install /tmp/espeak-ng/build
   sudo ldconfig
+  sudo install -d "$(dirname "$espeak_ng_marker")"
+  printf '%s\n' "$espeak_ng_commit" \
+    | sudo tee "$espeak_ng_marker" >/dev/null
 fi
 
 # 3. Clone only if necessary, then install/verify CUDA dependencies and test.

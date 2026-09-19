@@ -4,7 +4,7 @@
 Stepwise installation (each step skips components that are already suitable):
 
 1. Install the Ubuntu prerequisites listed in README.md if they are missing.
-2. Build the pinned espeak-ng commit if ``espeak-ng`` is not on ``PATH``.
+2. Build the pinned espeak-ng commit unless the installation marker confirms it.
 3. Ensure an NVIDIA driver is installed and ``nvidia-smi --list-gpus`` works.
    Host driver installation is intentionally left to the machine or cloud provider.
 4. From the PathBench checkout, run ``python3 tools/test_gpu_predictors.py``.
@@ -141,6 +141,7 @@ def main() -> int:
         if not python_succeeds(venv_python, torch_check):
             run([
                 str(venv_python), "-m", "pip", "install",
+                "--force-reinstall",
                 f"torch=={args.pytorch_version}", f"torchaudio=={args.pytorch_version}",
                 "--index-url", f"https://download.pytorch.org/whl/{cuda_tag}",
             ], "Installing missing or mismatched CUDA-enabled PyTorch packages")

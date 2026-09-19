@@ -41,12 +41,14 @@ class CommandError(RuntimeError):
         self.returncode = returncode
 
 
-def run(command: list[str], description: str) -> None:
+def run(
+    command: list[str], description: str, *, cwd: Path | None = None
+) -> None:
     """Run a visible command and turn a nonzero status into a useful error."""
     print(f"\n==> {description}", flush=True)
     print("+ " + " ".join(command), flush=True)
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, cwd=cwd)
     except subprocess.CalledProcessError as error:
         raise CommandError(
             f"{description} failed with exit status {error.returncode}. "
@@ -99,6 +101,7 @@ def python_succeeds(python: Path | str, code: str) -> bool:
 
 def main() -> int:
     args = parse_args()
+    venv = args.venv.expanduser().resolve()
     try:
         python = require_program(
             args.python, "Set --python to a Python 3.10-3.12 executable."
@@ -125,11 +128,11 @@ def main() -> int:
             )
 
         run([nvidia_smi, "--list-gpus"], "Checking the NVIDIA driver and visible GPUs")
-        if not (args.venv / "bin" / "python").is_file():
-            run([python, "-m", "venv", str(args.venv)], "Creating the GPU virtual environment")
+        if not (venv / "bin" / "python").is_file():
+            run([python, "-m", "venv", str(venv)], "Creating the GPU virtual environment")
         else:
-            print(f"\n==> Reusing existing virtual environment: {args.venv}")
-        venv_python = args.venv / "bin" / "python"
+            print(f"\n==> Reusing existing virtual environment: {venv}")
+        venv_python = venv / "bin" / "python"
         cuda_tag = f"cu{args.cuda_version.replace('.', '')}"
 
         torch_check = (
@@ -184,7 +187,7 @@ def main() -> int:
             str(venv_python), "-m", "pytest",
             "tests/test_evaluators.py::TestEvaluatorMethods::test_articulatory_precision",
             "tests/test_evaluators.py::TestEvaluatorMethods::test_artp_double_asr", "-v",
-        ], "Running the ArtP and DArtP smoke tests")
+        ], "Running the ArtP and DArtP smoke tests", cwd=REPO_ROOT)
     except CommandError as error:
         print(f"\nError: {error}", file=sys.stderr)
         return error.returncode

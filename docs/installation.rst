@@ -39,5 +39,8 @@ Without sudo access, a containerised environment such as Docker is recommended.
 
 .. note::
 
-   PathBench cannot be published to PyPI because it depends on Git-hosted forks
-   of ``phonemizer`` and ``pyctcdecode``.
+   PathBench's Python dependencies are available as versioned package-index
+   releases, including ``phonemizer-fork==3.3.2`` and
+   ``pyctcdecode==0.5.0``. Installing them does not require GitHub credentials.
+   The ``espeak-ng`` shared library remains a separate system dependency; use
+   the revision documented in the project README for reproducible IPA output.

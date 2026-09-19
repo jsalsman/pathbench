@@ -122,7 +122,51 @@ def test_already_installed_verified_model(monkeypatch, tmp_path):
     assert tool.installed_language_model("0" * 64) is None
 
 
+def test_forced_download_replaces_an_installed_model(monkeypatch, tmp_path):
+    installed = tmp_path / "lms" / "wiki_en_token.arpa.bin"
+    refreshed = tmp_path / "refreshed" / "wiki_en_token.arpa.bin"
+    monkeypatch.setattr(tool, "installed_language_model", lambda _digest: installed)
+    calls = []
+
+    def install(url, digest, cache, *, force):
+        calls.append((url, digest, cache, force))
+        return refreshed
+
+    monkeypatch.setattr(tool, "install_language_model", install)
+    result = tool.prepare_language_model(
+        download=True,
+        url="https://example/custom-model",
+        expected_sha256="1" * 64,
+        cache_dir=tmp_path / "cache",
+        force=True,
+        installed_sha256=None,
+    )
+
+    assert result == refreshed
+    assert calls == [
+        ("https://example/custom-model", "1" * 64, tmp_path / "cache", True)
+    ]
+
+
+def test_force_without_download_remains_opted_out(monkeypatch, tmp_path):
+    installed = tmp_path / "lms" / "wiki_en_token.arpa.bin"
+    monkeypatch.setattr(tool, "installed_language_model", lambda _digest: installed)
+    monkeypatch.setattr(
+        tool,
+        "install_language_model",
+        lambda *_args, **_kwargs: pytest.fail("download must remain opt-in"),
+    )
+
+    assert tool.prepare_language_model(
+        download=False,
+        url="https://example/custom-model",
+        expected_sha256="1" * 64,
+        cache_dir=tmp_path / "cache",
+        force=True,
+        installed_sha256=None,
+    ) == installed
+
+
 def test_download_remains_opt_in(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["tool"])
     assert tool.parse_args().download_language_model is False
-

@@ -253,6 +253,24 @@ def validate_language_model(venv_python: Path, model: Path) -> None:
     ], "Validating the English KenLM model")
 
 
+def prepare_language_model(
+    *,
+    download: bool,
+    url: str,
+    expected_sha256: str,
+    cache_dir: Path,
+    force: bool,
+    installed_sha256: str | None,
+) -> Path | None:
+    """Reuse an installed model, unless an opted-in forced refresh was requested."""
+    model = installed_language_model(installed_sha256)
+    if download and (model is None or force):
+        return install_language_model(
+            url, expected_sha256, cache_dir, force=force,
+        )
+    return model
+
+
 def require_program(program: str, explanation: str) -> str:
     path = shutil.which(program)
     if path is None:
@@ -347,13 +365,15 @@ def main() -> int:
         known_installed_digest = (
             expected_digest if args.language_model_url == LANGUAGE_MODEL_URL else None
         )
-        model = installed_language_model(known_installed_digest)
-        if model is None and args.download_language_model:
-            model = install_language_model(
-                args.language_model_url, expected_digest or "",
-                args.language_model_cache, force=args.force_language_model_download,
-            )
-        elif model is None:
+        model = prepare_language_model(
+            download=args.download_language_model,
+            url=args.language_model_url,
+            expected_sha256=expected_digest or "",
+            cache_dir=args.language_model_cache,
+            force=args.force_language_model_download,
+            installed_sha256=known_installed_digest,
+        )
+        if model is None:
             print(
                 "\nWarning: the English n-gram model is absent. The DArtP test "
                 "will be reported as skipped; see README.md's N-gram models section.",

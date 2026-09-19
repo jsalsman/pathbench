@@ -7,6 +7,34 @@ on:
     branches: ["**"]
 
 jobs:
+  dependency-resolution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve dependencies without GitHub credentials
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          python -m venv /tmp/pathbench-clean
+          /tmp/pathbench-clean/bin/python -m pip install --upgrade pip
+          /tmp/pathbench-clean/bin/python -m pip install \
+            --dry-run --ignore-installed --report /tmp/install-report.json .
+          /tmp/pathbench-clean/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("/tmp/install-report.json").read_text())
+          urls = [item["download_info"]["url"] for item in report["install"]]
+          vcs_urls = [url for url in urls if url.startswith("git+") or "github.com" in url]
+          assert not vcs_urls, f"VCS/GitHub dependencies remain: {vcs_urls}"
+          PY
+
   test:
     runs-on: ubuntu-latest
     strategy:

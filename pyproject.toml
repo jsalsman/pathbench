@@ -50,8 +50,10 @@ dependencies = [
     "transformers",
     "dtw-python",
     "jiwer",
-    "phonemizer-fork @ git+https://github.com/thewh1teagle/phonemizer-fork.git",
-    "pyctcdecode @ git+https://github.com/kensho-technologies/pyctcdecode.git",
+    # PyPI release of the fork; it continues to expose the ``phonemizer`` API.
+    "phonemizer-fork==3.3.2",
+    # Keep every runtime dependency installable without VCS/GitHub access.
+    "pyctcdecode==0.5.0",
     "praat-parselmouth>=0.4.4",
     "scikit-learn",
 ]

@@ -210,6 +210,13 @@ Package installation is the recommended pathway when incorporating PathBench
 into an existing environment. In that case, you are responsible for resolving
 dependency conflicts.
 
+All Python runtime dependencies are available from package indexes rather than
+VCS URLs. In particular, `phonemizer-fork==3.3.2` (which installs the
+`phonemizer` import package) and `pyctcdecode==0.5.0` use versioned PyPI
+releases, so installing PathBench does not require GitHub credentials. The
+system-level espeak-ng revision below remains separately pinned because its
+language-specific IPA output is part of the metric definition.
+
 ### Package installation
 
 **System dependencies** (not installable via pip — must be installed separately):

@@ -167,6 +167,22 @@ def test_force_without_download_remains_opted_out(monkeypatch, tmp_path):
     ) == installed
 
 
+def test_manual_binary_is_not_compared_with_download_digest():
+    assert tool.installed_model_digest(
+        download=False,
+        url=tool.LANGUAGE_MODEL_URL,
+        expected_sha256=tool.LANGUAGE_MODEL_SHA256,
+    ) is None
+
+
+def test_managed_builtin_download_verifies_installed_binary():
+    assert tool.installed_model_digest(
+        download=True,
+        url=tool.LANGUAGE_MODEL_URL,
+        expected_sha256=tool.LANGUAGE_MODEL_SHA256,
+    ) == tool.LANGUAGE_MODEL_SHA256
+
+
 def test_download_remains_opt_in(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["tool"])
     assert tool.parse_args().download_language_model is False

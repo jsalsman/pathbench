@@ -271,6 +271,20 @@ def prepare_language_model(
     return model
 
 
+def installed_model_digest(
+    *, download: bool, url: str, expected_sha256: str | None,
+) -> str | None:
+    """Return a digest only when this run is managing the pinned artifact.
+
+    Manually installed models are supported and need not be byte-for-byte
+    identical to the project's default Zenodo binary. They are checked by
+    KenLM's parser instead of against the download artifact's digest.
+    """
+    if download and url == LANGUAGE_MODEL_URL:
+        return expected_sha256
+    return None
+
+
 def require_program(program: str, explanation: str) -> str:
     path = shutil.which(program)
     if path is None:
@@ -362,8 +376,10 @@ def main() -> int:
         expected_digest = args.language_model_sha256
         if args.language_model_url == LANGUAGE_MODEL_URL and not expected_digest:
             expected_digest = LANGUAGE_MODEL_SHA256
-        known_installed_digest = (
-            expected_digest if args.language_model_url == LANGUAGE_MODEL_URL else None
+        known_installed_digest = installed_model_digest(
+            download=args.download_language_model,
+            url=args.language_model_url,
+            expected_sha256=expected_digest,
         )
         model = prepare_language_model(
             download=args.download_language_model,

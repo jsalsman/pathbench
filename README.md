@@ -195,7 +195,7 @@ else
     || git clone https://github.com/karkirowle/pathbench.git "$pathbench_root"
 fi
 cd "$pathbench_root"
-python3 tools/test_gpu_predictors.py
+python3 tools/test_gpu_predictors.py --download-language-model --cuda-version 12.4
 ```
 
 This procedure assumes that a working NVIDIA driver is already installed;
@@ -287,7 +287,7 @@ and driver can use the helper script to create a separate CUDA environment and
 run the focused ArtP and DArtP tests:
 
 ```bash
-python tools/test_gpu_predictors.py
+python tools/test_gpu_predictors.py --download-language-model --cuda-version 12.4
 ```
 
 The script checks for `nvidia-smi` and `espeak-ng`, creates
@@ -298,7 +298,7 @@ The first run downloads the Python packages and model checkpoints and therefore
 requires network access and several gigabytes of free disk space.
 
 Override its defaults with command-line options (or the corresponding
-`PYTHON`, `CUDA_VERSION`, `PYTORCH_VERSION`, and `VENV` environment variables)
+`PYTHON`, `PATHBENCH_CUDA_VERSION`, `PYTORCH_VERSION`, and `VENV` environment variables)
 when needed. The selected CUDA wheel must exist for the selected PyTorch release:
 
 ```bash
@@ -308,9 +308,19 @@ python tools/test_gpu_predictors.py --python python3.11 --cuda-version 12.6 \
 
 The script requires an NVIDIA driver compatible with the chosen CUDA wheel;
 installing the wheel does not install a host GPU driver or the CUDA toolkit.
-It does not download the DArtP n-gram model. Place the English model in `lms/`
-as described under [N-gram models](#n-gram-models); otherwise the DArtP test is
-reported as skipped. ArtP does not need that model.
+Language-model download is deliberately opt-in. With
+`--download-language-model`, the helper downloads the approximately **2.9 GB**
+English `wiki_en_token.arpa.bin` directly from the versioned
+[Zenodo record 18738598](https://zenodo.org/records/18738598/files/wiki_en_token.arpa.bin?download=1),
+checks its pinned SHA-256 (`8c5f43d9758f1af5b36740b45957d78690a7e712686270981d4f8db2262e74f7`),
+and caches the artifact in `~/.cache/pathbench`. The record is openly
+accessible and licensed **CC BY 4.0**, which permits automatic download and
+redistribution with attribution. Without the option, a missing model still
+causes DArtP to be reported as skipped. ArtP does not need the model. Custom
+mirrors must be supplied together with
+`--language-model-sha256`; the project-specific environment equivalents are
+`PATHBENCH_LANGUAGE_MODEL_URL`, `PATHBENCH_LANGUAGE_MODEL_SHA256`, and
+`PATHBENCH_LANGUAGE_MODEL_CACHE`.
 
 For both tests together, allow **at least 12 GB of system RAM and 8 GB of GPU
 VRAM**; **16 GB system RAM and 12–16 GB VRAM are recommended** to leave room
@@ -328,6 +338,17 @@ amount, availability, or uninterrupted runtime, and its temporary filesystem
 means the environment and downloaded checkpoints may need to be recreated in
 a later session. If Colab assigns a smaller GPU or low-RAM runtime, inspect
 `nvidia-smi` and available system memory before running the helper.
+On a Python 3.12 T4 runtime, use PyTorch 2.6.0's CUDA 12.4 wheels:
+
+```bash
+python tools/test_gpu_predictors.py --download-language-model --cuda-version 12.4
+```
+
+A successful run ends with `2 passed`. A second invocation reuses both
+`tools/gpu_venv` and the verified model cache rather than downloading them
+again. Colab's local disk is temporary, however, so both cache and environment
+are lost when its runtime is recycled; mount persistent storage and set
+`PATHBENCH_LANGUAGE_MODEL_CACHE` if reuse across sessions is important.
 
 **Without sudo access:** A containerised environment such as Docker is recommended.
 

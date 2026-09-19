@@ -101,6 +101,7 @@ def python_succeeds(python: Path | str, code: str) -> bool:
 
 def main() -> int:
     args = parse_args()
+    venv = args.venv.expanduser().resolve()
     try:
         python = require_program(
             args.python, "Set --python to a Python 3.10-3.12 executable."
@@ -127,11 +128,11 @@ def main() -> int:
             )
 
         run([nvidia_smi, "--list-gpus"], "Checking the NVIDIA driver and visible GPUs")
-        if not (args.venv / "bin" / "python").is_file():
-            run([python, "-m", "venv", str(args.venv)], "Creating the GPU virtual environment")
+        if not (venv / "bin" / "python").is_file():
+            run([python, "-m", "venv", str(venv)], "Creating the GPU virtual environment")
         else:
-            print(f"\n==> Reusing existing virtual environment: {args.venv}")
-        venv_python = args.venv / "bin" / "python"
+            print(f"\n==> Reusing existing virtual environment: {venv}")
+        venv_python = venv / "bin" / "python"
         cuda_tag = f"cu{args.cuda_version.replace('.', '')}"
 
         torch_check = (

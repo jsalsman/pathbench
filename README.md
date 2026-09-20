@@ -309,18 +309,27 @@ python tools/test_gpu_predictors.py --python python3.11 --cuda-version 12.6 \
 The script requires an NVIDIA driver compatible with the chosen CUDA wheel;
 installing the wheel does not install a host GPU driver or the CUDA toolkit.
 Language-model download is deliberately opt-in. With
-`--download-language-model`, the helper downloads the approximately **2.9 GB**
-English `wiki_en_token.arpa.bin` directly from the versioned
-[Zenodo record 18738598](https://zenodo.org/records/18738598/files/wiki_en_token.arpa.bin?download=1),
-checks its pinned SHA-256 (`8c5f43d9758f1af5b36740b45957d78690a7e712686270981d4f8db2262e74f7`),
-and caches the artifact in `~/.cache/pathbench`. The record is openly
+`--download-language-model`, the helper uses HTTP range requests against the
+immutable [35 GB Zenodo archive](https://zenodo.org/api/records/18738598/files/lms.zip/content)
+to retrieve only the compressed English member: **8,582,666,912 bytes**
+(approximately 8.0 GiB). It streams the raw DEFLATE data into a temporary file,
+producing a **14,600,342,241-byte** model (approximately 13.6 GiB), and checks
+the member metadata, CRC-32, expanded-model SHA-256
+(`8c5f43d9758f1af5b36740b45957d78690a7e712686270981d4f8db2262e74f7`),
+and KenLM readability before atomically installing it. The server or any proxy
+must support standards-compliant byte ranges (HTTP 206 and `Content-Range`);
+the helper refuses an HTTP 200 response rather than accidentally downloading
+the complete archive. Allow space for the installed model, its temporary
+expanded copy, and at least a 1 GiB safety margin. The record is openly
 accessible and licensed **CC BY 4.0**, which permits automatic download and
 redistribution with attribution. Without the option, a missing model still
 causes DArtP to be reported as skipped. ArtP does not need the model. Custom
-mirrors must be supplied together with
+standalone file/archive mirrors remain supported but must be supplied together with
 `--language-model-sha256`; the project-specific environment equivalents are
 `PATHBENCH_LANGUAGE_MODEL_URL`, `PATHBENCH_LANGUAGE_MODEL_SHA256`, and
-`PATHBENCH_LANGUAGE_MODEL_CACHE`.
+`PATHBENCH_LANGUAGE_MODEL_CACHE`. The built-in range mode retains no compressed
+archive and treats the verified model under `lms/` as its cache; the cache
+directory applies to custom downloads.
 
 For both tests together, allow **at least 12 GB of system RAM and 8 GB of GPU
 VRAM**; **16 GB system RAM and 12–16 GB VRAM are recommended** to leave room
@@ -346,9 +355,10 @@ python tools/test_gpu_predictors.py --download-language-model --cuda-version 12.
 
 A successful run ends with `2 passed`. A second invocation reuses both
 `tools/gpu_venv` and the verified model cache rather than downloading them
-again. Colab's local disk is temporary, however, so both cache and environment
-are lost when its runtime is recycled; mount persistent storage and set
-`PATHBENCH_LANGUAGE_MODEL_CACHE` if reuse across sessions is important.
+again. Colab's local disk is ephemeral, however, so the installed 13.6 GiB
+model and environment are lost when its runtime is recycled. Persist the
+checkout itself if reuse across sessions is important (`PATHBENCH_LANGUAGE_MODEL_CACHE`
+only controls custom standalone downloads).
 
 **Without sudo access:** A containerised environment such as Docker is recommended.
 

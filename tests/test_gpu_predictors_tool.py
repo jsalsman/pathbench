@@ -122,6 +122,40 @@ def test_already_installed_verified_model(monkeypatch, tmp_path):
     assert tool.installed_language_model("0" * 64) is None
 
 
+def test_rejected_preferred_binary_blocks_arpa_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(tool, "REPO_ROOT", tmp_path)
+    models = tmp_path / "lms"
+    models.mkdir()
+    (models / "wiki_en_token.arpa.bin").write_bytes(b"rejected binary")
+    (models / "wiki_en_token.arpa").write_bytes(b"otherwise valid arpa")
+
+    assert tool.installed_language_model("0" * 64) is None
+
+
+def test_rejected_preferred_binary_is_replaced(monkeypatch, tmp_path):
+    rejected = tmp_path / "lms" / "wiki_en_token.arpa.bin"
+    fallback = tmp_path / "lms" / "wiki_en_token.arpa"
+    replacement = tmp_path / "replacement" / "wiki_en_token.arpa.bin"
+    rejected.parent.mkdir()
+    rejected.write_bytes(b"rejected binary")
+    fallback.write_bytes(b"otherwise valid arpa")
+    monkeypatch.setattr(tool, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(
+        tool,
+        "install_language_model",
+        lambda *_args, **_kwargs: replacement,
+    )
+
+    assert tool.prepare_language_model(
+        download=True,
+        url=tool.LANGUAGE_MODEL_URL,
+        expected_sha256="0" * 64,
+        cache_dir=tmp_path / "cache",
+        force=False,
+        installed_sha256="0" * 64,
+    ) == replacement
+
+
 def test_forced_download_replaces_an_installed_model(monkeypatch, tmp_path):
     installed = tmp_path / "lms" / "wiki_en_token.arpa.bin"
     refreshed = tmp_path / "refreshed" / "wiki_en_token.arpa.bin"

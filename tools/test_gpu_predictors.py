@@ -238,7 +238,10 @@ def installed_language_model(expected_sha256: str | None = None) -> Path | None:
         # authenticates an already-installed copy. Archive digests do not.
         if expected_sha256 and name == "wiki_en_token.arpa.bin":
             if sha256(path) != expected_sha256.lower():
-                continue
+                # The evaluator always prefers this binary when it exists. Do
+                # not fall back to an ARPA that the smoke test would not use;
+                # make the opted-in preparation path replace the bad binary.
+                return None
         return path
     return None
 

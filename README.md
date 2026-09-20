@@ -315,7 +315,7 @@ to retrieve only the compressed English member: **8,582,666,912 bytes**
 (approximately 8.0 GiB). It streams the raw DEFLATE data into a temporary file,
 producing a **14,600,342,241-byte** model (approximately 13.6 GiB), and checks
 the member metadata, CRC-32, expanded-model SHA-256
-(`8c5f43d9758f1af5b36740b45957d78690a7e712686270981d4f8db2262e74f7`),
+(`d786eec55174c696c0bf3327928ff496684f482194ba3c6ebdf4311acb823d00`),
 and KenLM readability before atomically installing it. The server or any proxy
 must support standards-compliant byte ranges (HTTP 206 and `Content-Range`);
 the helper refuses an HTTP 200 response rather than accidentally downloading
@@ -330,6 +330,21 @@ standalone file/archive mirrors remain supported but must be supplied together w
 `PATHBENCH_LANGUAGE_MODEL_CACHE`. The built-in range mode retains no compressed
 archive and treats the verified model under `lms/` as its cache; the cache
 directory applies to custom downloads.
+
+The built-in Zenodo artifact identity used by the live integration is:
+
+| Field | Published value |
+| --- | --- |
+| Archive (`lms.zip`) size | `35017940434` bytes |
+| Member | `lms/wiki_en_token.arpa.bin` |
+| Decompressed member size | `14600342241` bytes |
+| Compressed member size | `8582666912` bytes |
+| Member CRC-32 | `5afb90ef` |
+| Decompressed member SHA-256 | `d786eec55174c696c0bf3327928ff496684f482194ba3c6ebdf4311acb823d00` |
+
+The SHA-256 value is specifically the digest of the fully transferred and
+decompressed `lms/wiki_en_token.arpa.bin` member. It is **not** a digest of
+`lms.zip` or of the member's compressed DEFLATE stream.
 
 For both tests together, allow **at least 12 GB of system RAM and 8 GB of GPU
 VRAM**; **16 GB system RAM and 12–16 GB VRAM are recommended** to leave room

@@ -57,8 +57,8 @@ LANGUAGE_MODEL_MEMBER = "lms/wiki_en_token.arpa.bin"
 LANGUAGE_MODEL_SIZE = 14_600_342_241
 LANGUAGE_MODEL_COMPRESSED_SIZE = 8_582_666_912
 LANGUAGE_MODEL_CRC32 = 0x5AFB90EF
-# Independently calculated from the extracted English model (not the ZIP bytes).
-LANGUAGE_MODEL_SHA256 = "8c5f43d9758f1af5b36740b45957d78690a7e712686270981d4f8db2262e74f7"
+# Calculated from the decompressed member, not lms.zip or its DEFLATE stream.
+LANGUAGE_MODEL_SHA256 = "d786eec55174c696c0bf3327928ff496684f482194ba3c6ebdf4311acb823d00"
 USER_AGENT = "PathBench GPU predictor model installer/1.0"
 RANGE_BLOCK_SIZE = 1024 * 1024
 RANGE_RETRIES = 4

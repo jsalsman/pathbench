@@ -126,6 +126,14 @@ class NativeSystem:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         ).returncode == 0)
 
+    def is_virtual_machine(self) -> bool:
+        """Return whether systemd identifies this host as a virtual machine."""
+        detector = self.which("systemd-detect-virt")
+        return bool(detector and self.execute(
+            [detector, "--quiet", "--vm"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0)
+
     def privilege_prefix(self) -> list[str]:
         if self.geteuid() == 0:
             return []
@@ -734,11 +742,16 @@ def install_system_packages(system: NativeSystem, python: str) -> list[str]:
     prefix = system.privilege_prefix()  # establish access before apt update changes state
     packages = list(SYSTEM_PACKAGES)
     distro_python = Path(python).resolve().as_posix().startswith("/usr/bin/python")
-    if distro_python and system.execute(
-        [python, "-c", "import venv"], stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ).returncode:
-        packages.append("python3-venv")
+    if distro_python:
+        # Importing venv does not prove that Debian's separately packaged
+        # ensurepip payload is installed.  Exercise the operation we need on a
+        # disposable directory so fresh/minimal hosts get python3-venv.
+        with tempfile.TemporaryDirectory(prefix="pathbench-venv-probe-") as probe:
+            if system.execute(
+                [python, "-m", "venv", str(Path(probe) / "venv")],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode:
+                packages.append("python3-venv")
     env = os.environ.copy()
     env["DEBIAN_FRONTEND"] = "noninteractive"
     print("Native packages to install: " + ", ".join(packages))
@@ -799,10 +812,12 @@ def ensure_espeak(system: NativeSystem, *, install: bool,
 
 def nvidia_driver_setup(system: NativeSystem, *, confirm: bool) -> bool:
     """Preflight/install Ubuntu's recommended driver; return reboot-required."""
-    if system.is_colab() or system.is_container() or os.environ.get("WSL_DISTRO_NAME"):
+    if (system.is_colab() or system.is_container() or system.is_virtual_machine()
+            or os.environ.get("WSL_DISTRO_NAME")):
         raise RuntimeError(
-            "NVIDIA driver installation is refused in Colab, WSL, containers, Kubernetes, "
-            "and GPU-passthrough environments. Install the driver on the host; restarting a "
+            "NVIDIA driver installation is refused in virtual machines, Colab, WSL, "
+            "containers, Kubernetes, and GPU-passthrough environments. Install the driver "
+            "on the host; restarting a "
             "notebook/container cannot activate a newly installed host kernel module."
         )
     if system.os_release().get("ID") != "ubuntu":

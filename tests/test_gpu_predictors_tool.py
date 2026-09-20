@@ -277,6 +277,7 @@ class FakeNative:
     def which(self, name): return self.programs.get(name)
     def is_colab(self): return False
     def is_container(self): return False
+    def is_virtual_machine(self): return False
     def execute(self, command, **_kwargs):
         self.commands.append(command)
         if self.responses:
@@ -320,6 +321,17 @@ def test_one_apt_install_contains_expected_packages(monkeypatch):
     assert "python3-venv" not in installs[0]
 
 
+def test_failed_venv_creation_installs_python3_venv(monkeypatch):
+    fake = FakeNative(responses=[subprocess.CompletedProcess([], 1)])
+    monkeypatch.setattr(tool.Path, "resolve", lambda self: Path("/usr/bin/python3"))
+
+    tool.install_system_packages(fake, "python3")
+
+    assert fake.commands[0][:3] == ["python3", "-m", "venv"]
+    installs = [command for command in fake.commands if "install" in command]
+    assert "python3-venv" in installs[0]
+
+
 def test_apt_failure_preserves_status(monkeypatch):
     fake = FakeNative(responses=[tool.subprocess.CompletedProcess([], 7)])
     monkeypatch.setattr(tool.Path, "resolve", lambda self: Path("/opt/uv/python"))
@@ -357,11 +369,17 @@ def test_espeak_install_does_not_fetch_abbreviated_commit(monkeypatch, tmp_path)
             tool.ESPEAK_NG_COMMIT] in fake.commands
 
 
-@pytest.mark.parametrize("colab,container", [(True, False), (False, True)])
-def test_driver_install_refused_in_managed_environments(monkeypatch, colab, container):
+@pytest.mark.parametrize(
+    "colab,container,virtual_machine",
+    [(True, False, False), (False, True, False), (False, False, True)],
+)
+def test_driver_install_refused_in_managed_environments(
+    monkeypatch, colab, container, virtual_machine,
+):
     fake = FakeNative()
     monkeypatch.setattr(fake, "is_colab", lambda: colab)
     monkeypatch.setattr(fake, "is_container", lambda: container)
+    monkeypatch.setattr(fake, "is_virtual_machine", lambda: virtual_machine)
     with pytest.raises(RuntimeError, match="host"):
         tool.nvidia_driver_setup(fake, confirm=True)
     assert fake.commands == []
@@ -393,6 +411,18 @@ def test_driver_only_main_skips_unrelated_espeak_validation(monkeypatch, tmp_pat
 def test_native_system_detects_additional_container_environments(monkeypatch, name):
     monkeypatch.setenv(name, "managed")
     assert tool.NativeSystem(which=lambda _name: None).is_container()
+
+
+def test_native_system_uses_vm_specific_virtualization_probe():
+    commands = []
+
+    def execute(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    system = tool.NativeSystem(runner=execute, which=lambda name: f"/usr/bin/{name}")
+    assert system.is_virtual_machine()
+    assert commands == [["/usr/bin/systemd-detect-virt", "--quiet", "--vm"]]
 
 
 def test_range_reader_validates_content_range_and_coalesces(monkeypatch):

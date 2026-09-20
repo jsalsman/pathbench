@@ -57,6 +57,22 @@ def test_successful_download_prefers_binary_and_reuses_cache(monkeypatch, tmp_pa
     assert len(calls) == 1
 
 
+def test_installing_arpa_removes_stale_preferred_binary(monkeypatch, tmp_path):
+    payload = zip_bytes({"models/wiki_en_token.arpa": b"replacement arpa"})
+    _calls, digest = configure(monkeypatch, tmp_path, payload)
+    stale_binary = tmp_path / "repo" / "lms" / "wiki_en_token.arpa.bin"
+    stale_binary.parent.mkdir(parents=True)
+    stale_binary.write_bytes(b"stale binary")
+
+    installed = tool.install_language_model(
+        "https://example/model.zip", digest, tmp_path / "cache",
+    )
+
+    assert installed.name == "wiki_en_token.arpa"
+    assert installed.read_bytes() == b"replacement arpa"
+    assert not stale_binary.exists()
+
+
 def test_checksum_mismatch_removes_partial(monkeypatch, tmp_path):
     calls, _ = configure(monkeypatch, tmp_path, b"not expected")
     with pytest.raises(RuntimeError, match="SHA-256 mismatch"):

@@ -222,6 +222,11 @@ def install_language_model(
         if extracted.stat().st_size == 0:
             raise RuntimeError("Downloaded language model is empty")
         installed = models_dir / extracted.name
+        if installed.name == "wiki_en_token.arpa":
+            # The evaluator prefers the binary whenever it exists. Removing a
+            # stale binary ensures it actually consumes the verified ARPA we
+            # are about to install and validate.
+            (models_dir / "wiki_en_token.arpa.bin").unlink(missing_ok=True)
         os.replace(extracted, installed)
         return installed
     finally:

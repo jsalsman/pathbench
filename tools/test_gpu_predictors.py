@@ -23,6 +23,7 @@ VRAM recommended). Google Colab NVIDIA GPU runtimes are supported when
 from __future__ import annotations
 
 import argparse
+import ctypes.util
 import hashlib
 import http.client
 import io
@@ -62,6 +63,56 @@ LANGUAGE_MODEL_SHA256 = "d786eec55174c696c0bf3327928ff496684f482194ba3c6ebdf4311
 USER_AGENT = "PathBench GPU predictor model installer/1.0"
 RANGE_BLOCK_SIZE = 1024 * 1024
 RANGE_RETRIES = 4
+ESPEAK_NG_COMMIT = "2ea41210"
+ESPEAK_NG_MARKER = Path("/usr/local/share/pathbench/espeak-ng-commit")
+SYSTEM_PACKAGES = (
+    "git", "ca-certificates", "curl", "build-essential", "cmake",
+    "ninja-build", "pkg-config", "libfftw3-dev", "liblapack-dev",
+)
+MANUAL_PREREQUISITES = ", ".join(SYSTEM_PACKAGES) + ", and espeak-ng commit " + ESPEAK_NG_COMMIT
+
+
+class NativeSystem:
+    """Small injectable boundary around native-host operations."""
+
+    def __init__(self, *, runner=None, which=None, geteuid=None) -> None:
+        self.runner = runner or subprocess.run
+        self.which = which or shutil.which
+        self.geteuid = geteuid or getattr(os, "geteuid", lambda: 1)
+
+    def execute(self, command, **kwargs):
+        return self.runner(command, **kwargs)
+
+    def os_release(self) -> dict[str, str]:
+        values = {}
+        try:
+            for line in Path("/etc/os-release").read_text().splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key] = value.strip().strip('"')
+        except OSError:
+            pass
+        return values
+
+    def is_colab(self) -> bool:
+        return bool(os.environ.get("COLAB_RELEASE_TAG") or Path("/content").exists())
+
+    def is_container(self) -> bool:
+        return (Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+                or bool(os.environ.get("KUBERNETES_SERVICE_HOST")))
+
+    def privilege_prefix(self) -> list[str]:
+        if self.geteuid() == 0:
+            return []
+        sudo = self.which("sudo")
+        if sudo and self.execute([sudo, "-n", "true"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL).returncode == 0:
+            return [sudo, "-n"]
+        raise RuntimeError("System installation requires root or passwordless noninteractive sudo; no changes were made.")
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
 
 
 class CommandError(RuntimeError):
@@ -134,6 +185,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-language-model-download", action="store_true",
         help="discard a cached artifact and download it again",
+    )
+    parser.add_argument(
+        "--install-system-dependencies", action=argparse.BooleanOptionalAction,
+        default=_env_flag("PATHBENCH_INSTALL_SYSTEM_DEPENDENCIES"),
+        help="install native Debian/Ubuntu prerequisites (PATHBENCH_INSTALL_SYSTEM_DEPENDENCIES)",
+    )
+    parser.add_argument(
+        "--install-nvidia-driver", action=argparse.BooleanOptionalAction,
+        default=_env_flag("PATHBENCH_INSTALL_NVIDIA_DRIVER"),
+        help="EXPERIMENTAL: preflight a driver install on administrator-controlled bare-metal Ubuntu",
+    )
+    parser.add_argument(
+        "--confirm-nvidia-driver-install", action="store_true",
+        help="confirm the separately requested Ubuntu-recommended driver installation",
     )
     return parser.parse_args()
 
@@ -621,18 +686,154 @@ def python_succeeds(python: Path | str, code: str) -> bool:
     ).returncode == 0
 
 
-def main() -> int:
+def supported_apt_host(system: NativeSystem) -> bool:
+    release = system.os_release()
+    identities = {release.get("ID", ""), *release.get("ID_LIKE", "").split()}
+    return bool(identities & {"ubuntu", "debian"} and system.which("apt-get"))
+
+
+def _checked(system: NativeSystem, command: list[str], description: str, **kwargs):
+    print(f"\n==> {description}\n+ {' '.join(map(str, command))}", flush=True)
+    result = system.execute(command, **kwargs)
+    if result.returncode:
+        raise CommandError(f"{description} failed with exit status {result.returncode}: "
+                           + " ".join(map(str, command)), result.returncode)
+    return result
+
+
+def install_system_packages(system: NativeSystem, python: str) -> list[str]:
+    """Install build prerequisites only after the caller's explicit opt-in."""
+    if not supported_apt_host(system):
+        raise RuntimeError("Automatic native setup supports only Ubuntu/Debian with apt-get. "
+                           f"Install these prerequisites manually: {MANUAL_PREREQUISITES}")
+    prefix = system.privilege_prefix()  # establish access before apt update changes state
+    packages = list(SYSTEM_PACKAGES)
+    distro_python = Path(python).resolve().as_posix().startswith("/usr/bin/python")
+    if distro_python and system.execute(
+        [python, "-c", "import venv"], stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode:
+        packages.append("python3-venv")
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    print("Native packages to install: " + ", ".join(packages))
+    _checked(system, prefix + ["apt-get", "update"], "Updating apt package metadata", env=env)
+    _checked(system, prefix + ["apt-get", "install", "-y", "--no-install-recommends", *packages],
+             "Installing native prerequisites", env=env)
+    return prefix
+
+
+def espeak_probe(system: NativeSystem) -> bool:
+    executable = system.which("espeak-ng")
+    if not executable or not ctypes.util.find_library("espeak-ng"):
+        return False
+    return system.execute([executable, "--ipa", "-q", "PathBench"],
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def ensure_espeak(system: NativeSystem, *, install: bool,
+                  privilege_prefix: list[str] | None = None,
+                  marker: Path = ESPEAK_NG_MARKER) -> None:
+    marker_value = None
+    try:
+        marker_value = marker.read_text().strip()
+    except OSError:
+        pass
+    if marker_value == ESPEAK_NG_COMMIT and espeak_probe(system):
+        print(f"\n==> Reusing pinned espeak-ng {ESPEAK_NG_COMMIT}")
+        return
+    if not install:
+        raise RuntimeError(
+            f"Pinned espeak-ng revision {ESPEAK_NG_COMMIT} is required; marker {marker} "
+            "is missing/mismatched or its runtime probe failed. Re-run with "
+            "--install-system-dependencies to rebuild it."
+        )
+    prefix = privilege_prefix if privilege_prefix is not None else system.privilege_prefix()
+    jobs = max(1, min(os.cpu_count() or 1, 8))
+    with tempfile.TemporaryDirectory(prefix="pathbench-espeak-") as temporary:
+        source, build = Path(temporary) / "source", Path(temporary) / "build"
+        _checked(system, ["git", "clone", "https://github.com/espeak-ng/espeak-ng.git", str(source)],
+                 "Cloning espeak-ng")
+        _checked(system, ["git", "-C", str(source), "fetch", "origin", ESPEAK_NG_COMMIT],
+                 "Fetching pinned espeak-ng revision")
+        _checked(system, ["git", "-C", str(source), "checkout", "--detach", ESPEAK_NG_COMMIT],
+                 "Checking out pinned espeak-ng revision")
+        _checked(system, ["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
+                          "-DUSE_ASYNC=OFF", "-DBUILD_SHARED_LIBS=ON"], "Configuring espeak-ng")
+        _checked(system, ["cmake", "--build", str(build), "--parallel", str(jobs)], "Building espeak-ng")
+        _checked(system, prefix + ["cmake", "--install", str(build)], "Installing espeak-ng")
+        _checked(system, prefix + ["ldconfig"], "Refreshing the shared-library cache")
+        if not espeak_probe(system):
+            raise RuntimeError("The installed espeak-ng failed its executable/shared-library phonemization probe; marker was not written.")
+        staged = Path(temporary) / "espeak-ng-commit"
+        staged.write_text(ESPEAK_NG_COMMIT + "\n")
+        _checked(system, prefix + ["install", "-D", "-m", "0644", str(staged), str(marker) + ".tmp"],
+                 "Staging the espeak-ng revision marker")
+        _checked(system, prefix + ["mv", str(marker) + ".tmp", str(marker)],
+                 "Recording the espeak-ng revision atomically")
+
+
+def nvidia_driver_setup(system: NativeSystem, *, confirm: bool) -> bool:
+    """Preflight/install Ubuntu's recommended driver; return reboot-required."""
+    if system.is_colab() or system.is_container() or os.environ.get("WSL_DISTRO_NAME"):
+        raise RuntimeError(
+            "NVIDIA driver installation is refused in Colab, WSL, containers, Kubernetes, "
+            "and GPU-passthrough environments. Install the driver on the host; restarting a "
+            "notebook/container cannot activate a newly installed host kernel module."
+        )
+    if system.os_release().get("ID") != "ubuntu":
+        raise RuntimeError("NVIDIA driver installation is supported only on a bare-metal Ubuntu host.")
+    _checked(system, ["lspci"], "Identifying NVIDIA hardware")
+    kernel = system.execute(["uname", "-r"], text=True, capture_output=True)
+    if kernel.returncode:
+        raise CommandError("Reading the running kernel failed", kernel.returncode)
+    kernel_version = kernel.stdout.strip()
+    headers = f"linux-headers-{kernel_version}"
+    header_check = system.execute(["dpkg-query", "-W", "-f=${{Status}}", headers],
+                                  text=True, capture_output=True)
+    if header_check.returncode or "ok installed" not in header_check.stdout:
+        raise RuntimeError(f"Matching running-kernel headers are required: {headers}")
+    devices = system.execute(["ubuntu-drivers", "devices"], text=True, capture_output=True)
+    if devices.returncode:
+        raise CommandError("Querying Ubuntu's recommended NVIDIA driver failed", devices.returncode)
+    matches = re.findall(r"(nvidia-driver-\d+(?:-server)?)\s+.*recommended", devices.stdout)
+    if not matches:
+        raise RuntimeError("ubuntu-drivers did not report a recommended signed NVIDIA driver package.")
+    package = matches[0]
+    print(f"Running kernel: {kernel_version}\nUbuntu recommended driver: {package}")
+    if not confirm:
+        print("Dry run only; add --confirm-nvidia-driver-install to install this package.")
+        return False
+    prefix = system.privilege_prefix()
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    _checked(system, prefix + ["apt-get", "update"], "Updating apt package metadata", env=env)
+    _checked(system, prefix + ["apt-get", "install", "-y", package],
+             "Installing Ubuntu-recommended signed NVIDIA driver", env=env)
+    print("NVIDIA driver installed successfully. A host reboot is required; stopping now.")
+    return True
+
+
+def main(system: NativeSystem | None = None) -> int:
     args = parse_args()
+    system = system or NativeSystem()
     venv = args.venv.expanduser().resolve()
     try:
         python = require_program(
             args.python, "Set --python to a Python 3.10-3.12 executable."
         )
+        privilege_prefix = None
+        if args.install_system_dependencies:
+            privilege_prefix = install_system_packages(system, python)
+        ensure_espeak(system, install=args.install_system_dependencies,
+                      privilege_prefix=privilege_prefix)
+        if args.install_nvidia_driver:
+            if nvidia_driver_setup(system, confirm=args.confirm_nvidia_driver_install):
+                return 0
+            return 0
         nvidia_smi = require_program(
             "nvidia-smi", "Install an NVIDIA driver and expose the GPU to this environment."
-        )
-        require_program(
-            "espeak-ng", "Install the pinned version described in README.md first."
         )
 
         version_check = subprocess.run(

@@ -256,6 +256,101 @@ def test_download_remains_opt_in(monkeypatch):
     assert tool.parse_args().download_language_model is False
 
 
+def test_native_install_remains_opt_in_and_cli_overrides_environment(monkeypatch):
+    monkeypatch.setenv("PATHBENCH_INSTALL_SYSTEM_DEPENDENCIES", "1")
+    monkeypatch.setattr(sys, "argv", ["tool", "--no-install-system-dependencies"])
+    assert tool.parse_args().install_system_dependencies is False
+
+
+class FakeNative:
+    def __init__(self, *, release=None, uid=0, programs=None, responses=None):
+        self.release = release or {"ID": "ubuntu"}
+        self.uid = uid
+        self.programs = {"apt-get": "/usr/bin/apt-get", **(programs or {})}
+        self.responses = list(responses or [])
+        self.commands = []
+
+    def os_release(self): return self.release
+    def which(self, name): return self.programs.get(name)
+    def is_colab(self): return False
+    def is_container(self): return False
+    def execute(self, command, **_kwargs):
+        self.commands.append(command)
+        if self.responses:
+            return self.responses.pop(0)
+        return tool.subprocess.CompletedProcess(command, 0, "", "")
+    def privilege_prefix(self):
+        if self.uid == 0:
+            return []
+        sudo = self.which("sudo")
+        if sudo and self.execute([sudo, "-n", "true"]).returncode == 0:
+            return [sudo, "-n"]
+        raise RuntimeError("no changes were made")
+
+
+def test_supported_ubuntu_and_unsupported_distribution():
+    assert tool.supported_apt_host(FakeNative())
+    assert not tool.supported_apt_host(FakeNative(release={"ID": "fedora"}))
+
+
+def test_root_and_passwordless_sudo_prefixes():
+    assert FakeNative(uid=0).privilege_prefix() == []
+    fake = FakeNative(uid=1000, programs={"sudo": "/usr/bin/sudo"})
+    assert fake.privilege_prefix() == ["/usr/bin/sudo", "-n"]
+    assert fake.commands == [["/usr/bin/sudo", "-n", "true"]]
+
+
+def test_missing_escalation_fails_before_changes():
+    fake = FakeNative(uid=1000)
+    with pytest.raises(RuntimeError, match="no changes"):
+        fake.privilege_prefix()
+    assert fake.commands == []
+
+
+def test_one_apt_install_contains_expected_packages(monkeypatch):
+    fake = FakeNative()
+    monkeypatch.setattr(tool.Path, "resolve", lambda self: Path("/opt/uv/python"))
+    tool.install_system_packages(fake, "python3.12")
+    installs = [c for c in fake.commands if "install" in c]
+    assert len(installs) == 1
+    assert set(tool.SYSTEM_PACKAGES) <= set(installs[0])
+    assert "python3-venv" not in installs[0]
+
+
+def test_apt_failure_preserves_status(monkeypatch):
+    fake = FakeNative(responses=[tool.subprocess.CompletedProcess([], 7)])
+    monkeypatch.setattr(tool.Path, "resolve", lambda self: Path("/opt/uv/python"))
+    with pytest.raises(tool.CommandError) as error:
+        tool.install_system_packages(fake, "python")
+    assert error.value.returncode == 7
+
+
+def test_matching_espeak_marker_is_reused(monkeypatch, tmp_path):
+    marker = tmp_path / "marker"
+    marker.write_text(tool.ESPEAK_NG_COMMIT)
+    monkeypatch.setattr(tool, "espeak_probe", lambda _system: True)
+    fake = FakeNative()
+    tool.ensure_espeak(fake, install=False, marker=marker)
+    assert fake.commands == []
+
+
+def test_mismatched_marker_requires_opt_in(tmp_path):
+    marker = tmp_path / "marker"
+    marker.write_text("old")
+    with pytest.raises(RuntimeError, match=tool.ESPEAK_NG_COMMIT):
+        tool.ensure_espeak(FakeNative(), install=False, marker=marker)
+
+
+@pytest.mark.parametrize("colab,container", [(True, False), (False, True)])
+def test_driver_install_refused_in_managed_environments(monkeypatch, colab, container):
+    fake = FakeNative()
+    monkeypatch.setattr(fake, "is_colab", lambda: colab)
+    monkeypatch.setattr(fake, "is_container", lambda: container)
+    with pytest.raises(RuntimeError, match="host"):
+        tool.nvidia_driver_setup(fake, confirm=True)
+    assert fake.commands == []
+
+
 def test_range_reader_validates_content_range_and_coalesces(monkeypatch):
     payload = bytes(range(256)) * 10000
     calls = []

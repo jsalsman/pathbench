@@ -141,66 +141,98 @@ Results are written to the `results_11/` directory as timestamped text files con
 
 We are continuously trying to make the installation easier for your use case.
 
-### Complete GPU installation (install missing components only)
+### GPU/Colab native bootstrap
 
-The following Ubuntu procedure is safe to re-run: it installs only absent apt
-packages, builds the pinned `espeak-ng` unless its commit marker matches,
-clones PathBench only when the checkout is absent, and lets the GPU helper reuse
-an existing virtual environment and matching Python packages.
+The helper makes **no host changes by default**. Without either installation flag it
+only validates the pinned native backend, NVIDIA visibility, and the Python/GPU
+environment:
 
 ```bash
-# 1. Install missing build prerequisites.
-packages=(git python3 python3-venv build-essential cmake libfftw3-dev liblapack-dev)
-missing=()
-for package in "${packages[@]}"; do
-  dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "ok installed" \
-    || missing+=("$package")
-done
-if ((${#missing[@]})); then
-  sudo apt-get update -qq
-  sudo apt-get install -y "${missing[@]}"
-fi
-
-# 2. Build the reproducible phonemizer backend unless the pinned commit is installed.
-espeak_ng_commit=2ea41210
-espeak_ng_marker=/usr/local/share/pathbench/espeak-ng-commit
-if ! command -v espeak-ng >/dev/null \
-    || [[ ! -r "$espeak_ng_marker" ]] \
-    || [[ "$(cat "$espeak_ng_marker")" != "$espeak_ng_commit" ]]; then
-  if { test -d /tmp/espeak-ng/.git \
-      || git clone https://github.com/espeak-ng/espeak-ng.git /tmp/espeak-ng; } \
-      && git -C /tmp/espeak-ng fetch origin "$espeak_ng_commit" \
-      && git -C /tmp/espeak-ng checkout --detach "$espeak_ng_commit" \
-      && cmake -S /tmp/espeak-ng -B /tmp/espeak-ng/build \
-        -DUSE_ASYNC=OFF -DBUILD_SHARED_LIBS=ON \
-      && cmake --build /tmp/espeak-ng/build -j"$(nproc)" \
-      && sudo cmake --install /tmp/espeak-ng/build \
-      && sudo ldconfig \
-      && sudo install -d "$(dirname "$espeak_ng_marker")"; then
-    printf '%s\n' "$espeak_ng_commit" \
-      | sudo tee "$espeak_ng_marker" >/dev/null
-  else
-    echo "Failed to install pinned espeak-ng; commit marker was not written." >&2
-    exit 1
-  fi
-fi
-
-# 3. Reuse the current checkout, or clone to a stable absolute destination.
-if pathbench_root=$(git rev-parse --show-toplevel 2>/dev/null) \
-    && test -f "$pathbench_root/tools/test_gpu_predictors.py"; then
-  : # Already anywhere inside a PathBench checkout.
-else
-  pathbench_root=${PATHBENCH_ROOT:-"$PWD/pathbench"}
-  test -d "$pathbench_root/.git" \
-    || git clone https://github.com/karkirowle/pathbench.git "$pathbench_root"
-fi
-cd "$pathbench_root"
-python3 tools/test_gpu_predictors.py --download-language-model --cuda-version 12.4
+python3.12 tools/test_gpu_predictors.py --python python3.12 --cuda-version 12.4 --pytorch-version 2.6.0
 ```
 
-This procedure assumes that a working NVIDIA driver is already installed;
-`nvidia-smi` must list the assigned GPU. Driver installation is host- and
-cloud-specific and is deliberately not attempted by the script.
+`--install-system-dependencies` (or
+`PATHBENCH_INSTALL_SYSTEM_DEPENDENCIES=1`; an explicit command-line setting takes
+precedence) is an opt-in to run noninteractive `apt-get update` and install `git`,
+`ca-certificates`, `curl`, `build-essential`, `cmake`, `ninja-build`, `pkg-config`,
+`libfftw3-dev`, and `liblapack-dev`. It adds `python3-venv` only for a distribution
+Python that lacks `venv`, not for a uv-managed interpreter. On Debian/Ubuntu it
+then builds espeak-ng at pinned commit **`2ea41210`**, installs its executable and
+shared library under `/usr/local`, refreshes the linker cache, and records success
+at `/usr/local/share/pathbench/espeak-ng-commit`. Root or passwordless
+noninteractive sudo is required. Other operating systems are rejected with the
+manual prerequisite list. A failed build/probe never writes the marker.
+
+#### Google Colab
+
+Colab owns the NVIDIA driver: this helper never replaces it, changes kernel
+modules/CUDA libraries, or reboots Colab. Select a GPU runtime first; if
+`nvidia-smi --list-gpus` fails, select a GPU runtime or reconnect to a new runtime.
+Acquire Python 3.12 using uv and clone the repository outside the helper, then run:
+
+```bash
+# after installing uv, Python 3.12, and cloning/cd'ing into PathBench
+uv python install 3.12
+git clone https://github.com/karkirowle/pathbench.git && cd pathbench
+python3.12 tools/test_gpu_predictors.py --python python3.12 --cuda-version 12.4 --pytorch-version 2.6.0 --install-system-dependencies --download-language-model
+```
+
+A fresh T4 validation should install the build packages, build pinned espeak-ng,
+create the CUDA environment, verify the English model, and finish with `2 passed`.
+A second invocation should report reuse of the marker, virtual environment,
+CUDA packages, dependencies, and verified model, again ending with `2 passed`.
+Colab storage is ephemeral. The driver-install option is always refused there.
+
+#### Container
+
+Native user-space dependencies may be installed inside a Debian/Ubuntu image:
+
+```bash
+python tools/test_gpu_predictors.py --install-system-dependencies --download-language-model
+```
+
+Configure the NVIDIA driver and NVIDIA Container Toolkit/runtime **on the host**,
+then expose the GPU to the container. Installing a host kernel driver inside a
+container, Kubernetes pod, WSL, or other GPU-passthrough guest is refused;
+restarting that guest cannot activate a host kernel module.
+
+#### Bare-metal Ubuntu
+
+Bootstrap ordinary dependencies independently of the driver:
+
+```bash
+python tools/test_gpu_predictors.py --install-system-dependencies --download-language-model
+```
+
+Driver handling is separate and experimental, intended only for an
+administrator-controlled bare-metal Ubuntu host. The first command is a
+non-destructive preflight: it reports `lspci`, the kernel and matching headers,
+and the signed package recommended by `ubuntu-drivers` (never inferred from the
+CUDA wheel):
+
+```bash
+python tools/test_gpu_predictors.py --install-nvidia-driver
+# Review the output, then explicitly approve package changes:
+python tools/test_gpu_predictors.py --install-nvidia-driver --confirm-nvidia-driver-install
+sudo reboot
+# Only after reboot, rerun normally; nvidia-smi --list-gpus must succeed.
+python tools/test_gpu_predictors.py --install-system-dependencies --download-language-model
+```
+
+The confirmed option runs apt and installs the Ubuntu-recommended
+`nvidia-driver-*` package, then stops with a successful **reboot required**
+message without creating a venv or running tests. It never uses NVIDIA's `.run`
+installer. `PATHBENCH_INSTALL_NVIDIA_DRIVER=1` can request preflight, but the
+confirmation intentionally has no environment equivalent.
+
+**Maintainer bare-metal integration checklist (do not run driver replacement in
+CI):** use a disposable administrator-controlled Ubuntu host; record `lspci`,
+`uname -r`, Secure Boot state, current `nvidia-smi`, and recommended package; run
+the unconfirmed preflight and verify it changes nothing; review apt's proposed
+changes; snapshot the host; confirm manually; verify the reboot-required exit;
+reboot from the host console; then verify `nvidia-smi --list-gpus` before running
+the helper again. Never perform this checklist in Colab, a container, WSL, a
+Kubernetes pod, or a provider-managed GPU VM.
 
 If you have the opportunity to start from a clean AWS/GCE instance, please do so and follow the make installation.
 

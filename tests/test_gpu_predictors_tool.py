@@ -24,6 +24,12 @@ sys.modules[SPEC.name] = tool
 SPEC.loader.exec_module(tool)
 
 
+def test_builtin_language_model_checksum_matches_published_value():
+    assert tool.LANGUAGE_MODEL_SHA256 == (
+        "d786eec55174c696c0bf3327928ff496684f482194ba3c6ebdf4311acb823d00"
+    )
+
+
 class Response(io.BytesIO):
     status = 206
 

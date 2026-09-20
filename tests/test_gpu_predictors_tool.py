@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import io
 import os
 from pathlib import Path
+import subprocess
 import sys
+from types import SimpleNamespace
 import urllib.error
 import zipfile
 import zlib
@@ -341,6 +344,19 @@ def test_mismatched_marker_requires_opt_in(tmp_path):
         tool.ensure_espeak(FakeNative(), install=False, marker=marker)
 
 
+def test_espeak_install_does_not_fetch_abbreviated_commit(monkeypatch, tmp_path):
+    fake = FakeNative()
+    monkeypatch.setattr(
+        tool.tempfile, "TemporaryDirectory", lambda **_kwargs: nullcontext(str(tmp_path))
+    )
+    monkeypatch.setattr(tool, "espeak_probe", lambda _system: True)
+    tool.ensure_espeak(fake, install=True, marker=tmp_path / "marker")
+    assert not any(command[:4] == ["git", "-C", str(tmp_path / "source"), "fetch"]
+                   for command in fake.commands)
+    assert ["git", "-C", str(tmp_path / "source"), "checkout", "--detach",
+            tool.ESPEAK_NG_COMMIT] in fake.commands
+
+
 @pytest.mark.parametrize("colab,container", [(True, False), (False, True)])
 def test_driver_install_refused_in_managed_environments(monkeypatch, colab, container):
     fake = FakeNative()
@@ -349,6 +365,34 @@ def test_driver_install_refused_in_managed_environments(monkeypatch, colab, cont
     with pytest.raises(RuntimeError, match="host"):
         tool.nvidia_driver_setup(fake, confirm=True)
     assert fake.commands == []
+
+
+def test_driver_header_query_uses_valid_status_format():
+    fake = FakeNative(responses=[
+        subprocess.CompletedProcess([], 0, "", ""),
+        subprocess.CompletedProcess([], 0, "6.8.0-test\n", ""),
+        subprocess.CompletedProcess([], 0, "install ok installed", ""),
+        subprocess.CompletedProcess([], 0, "driver : nvidia-driver-550 - distro non-free recommended\n", ""),
+    ])
+    tool.nvidia_driver_setup(fake, confirm=False)
+    assert fake.commands[2] == ["dpkg-query", "-W", "-f=${Status}",
+                                "linux-headers-6.8.0-test"]
+
+
+def test_driver_only_main_skips_unrelated_espeak_validation(monkeypatch, tmp_path):
+    args = SimpleNamespace(venv=tmp_path / "venv", install_nvidia_driver=True,
+                           confirm_nvidia_driver_install=False)
+    monkeypatch.setattr(tool, "parse_args", lambda: args)
+    monkeypatch.setattr(tool, "nvidia_driver_setup", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(tool, "ensure_espeak", lambda *_args, **_kwargs:
+                        pytest.fail("driver-only setup must not validate espeak"))
+    assert tool.main(FakeNative()) == 0
+
+
+@pytest.mark.parametrize("name", ["APPTAINER_NAME", "SINGULARITY_NAME", "container"])
+def test_native_system_detects_additional_container_environments(monkeypatch, name):
+    monkeypatch.setenv(name, "managed")
+    assert tool.NativeSystem(which=lambda _name: None).is_container()
 
 
 def test_range_reader_validates_content_range_and_coalesces(monkeypatch):

@@ -98,8 +98,33 @@ class NativeSystem:
         return bool(os.environ.get("COLAB_RELEASE_TAG") or Path("/content").exists())
 
     def is_container(self) -> bool:
-        return (Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
-                or bool(os.environ.get("KUBERNETES_SERVICE_HOST")))
+        marker_paths = (
+            Path("/.dockerenv"),
+            Path("/run/.containerenv"),
+            Path("/run/systemd/container"),
+            Path("/.singularity.d"),
+        )
+        container_environment = (
+            "container",
+            "KUBERNETES_SERVICE_HOST",
+            "APPTAINER_NAME",
+            "SINGULARITY_NAME",
+        )
+        if any(path.exists() for path in marker_paths) or any(
+            os.environ.get(name) for name in container_environment
+        ):
+            return True
+        try:
+            cgroups = Path("/proc/1/cgroup").read_text()
+        except OSError:
+            cgroups = ""
+        if re.search(r"/(?:docker|lxc|libpod|podman|kubepods)(?:[-/.]|$)", cgroups):
+            return True
+        detector = self.which("systemd-detect-virt")
+        return bool(detector and self.execute(
+            [detector, "--quiet", "--container"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0)
 
     def privilege_prefix(self) -> list[str]:
         if self.geteuid() == 0:
@@ -755,8 +780,6 @@ def ensure_espeak(system: NativeSystem, *, install: bool,
         source, build = Path(temporary) / "source", Path(temporary) / "build"
         _checked(system, ["git", "clone", "https://github.com/espeak-ng/espeak-ng.git", str(source)],
                  "Cloning espeak-ng")
-        _checked(system, ["git", "-C", str(source), "fetch", "origin", ESPEAK_NG_COMMIT],
-                 "Fetching pinned espeak-ng revision")
         _checked(system, ["git", "-C", str(source), "checkout", "--detach", ESPEAK_NG_COMMIT],
                  "Checking out pinned espeak-ng revision")
         _checked(system, ["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
@@ -790,7 +813,7 @@ def nvidia_driver_setup(system: NativeSystem, *, confirm: bool) -> bool:
         raise CommandError("Reading the running kernel failed", kernel.returncode)
     kernel_version = kernel.stdout.strip()
     headers = f"linux-headers-{kernel_version}"
-    header_check = system.execute(["dpkg-query", "-W", "-f=${{Status}}", headers],
+    header_check = system.execute(["dpkg-query", "-W", "-f=${Status}", headers],
                                   text=True, capture_output=True)
     if header_check.returncode or "ok installed" not in header_check.stdout:
         raise RuntimeError(f"Matching running-kernel headers are required: {headers}")
@@ -820,6 +843,9 @@ def main(system: NativeSystem | None = None) -> int:
     system = system or NativeSystem()
     venv = args.venv.expanduser().resolve()
     try:
+        if args.install_nvidia_driver:
+            nvidia_driver_setup(system, confirm=args.confirm_nvidia_driver_install)
+            return 0
         python = require_program(
             args.python, "Set --python to a Python 3.10-3.12 executable."
         )
@@ -828,10 +854,6 @@ def main(system: NativeSystem | None = None) -> int:
             privilege_prefix = install_system_packages(system, python)
         ensure_espeak(system, install=args.install_system_dependencies,
                       privilege_prefix=privilege_prefix)
-        if args.install_nvidia_driver:
-            if nvidia_driver_setup(system, confirm=args.confirm_nvidia_driver_install):
-                return 0
-            return 0
         nvidia_smi = require_program(
             "nvidia-smi", "Install an NVIDIA driver and expose the GPU to this environment."
         )

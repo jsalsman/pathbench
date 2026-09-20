@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import os
 from pathlib import Path
 import sys
 import urllib.error
 import zipfile
+import zlib
 
 import pytest
 
@@ -23,6 +25,16 @@ SPEC.loader.exec_module(tool)
 
 
 class Response(io.BytesIO):
+    status = 206
+
+    def __init__(self, value=b"", headers=None, status=206):
+        super().__init__(value)
+        self.headers = headers or {}
+        self.status = status
+
+    def getcode(self):
+        return self.status
+
     def __enter__(self):
         return self
 
@@ -158,8 +170,8 @@ def test_rejected_preferred_binary_is_replaced(monkeypatch, tmp_path):
     monkeypatch.setattr(tool, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
         tool,
-        "install_language_model",
-        lambda *_args, **_kwargs: replacement,
+        "install_zenodo_language_model",
+        lambda **_kwargs: replacement,
     )
 
     assert tool.prepare_language_model(
@@ -236,3 +248,150 @@ def test_managed_builtin_download_verifies_installed_binary():
 def test_download_remains_opt_in(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["tool"])
     assert tool.parse_args().download_language_model is False
+
+
+def test_range_reader_validates_content_range_and_coalesces(monkeypatch):
+    payload = bytes(range(256)) * 10000
+    calls = []
+
+    def open_range(request, **_kwargs):
+        start, end = map(int, request.headers["Range"].removeprefix("bytes=").split("-"))
+        calls.append((start, end))
+        return Response(payload[start:end + 1], {
+            "Content-Range": f"bytes {start}-{end}/{len(payload)}"
+        })
+
+    monkeypatch.setattr(tool.urllib.request, "urlopen", open_range)
+    reader = tool.BufferedHTTPRangeReader(
+        tool.HTTPRangeClient("https://example/archive", len(payload)), 1024 * 1024
+    )
+    reader.seek(17)
+    assert reader.read(5) == payload[17:22]
+    reader.seek(800_000)
+    assert reader.read(5) == payload[800_000:800_005]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("header", [None, "bytes 0-8/10", "nonsense"])
+def test_malformed_content_range_is_rejected(monkeypatch, header):
+    monkeypatch.setattr(tool.urllib.request, "urlopen", lambda *_a, **_k: Response(
+        b"0123456789", {"Content-Range": header} if header else {}
+    ))
+    with pytest.raises(RuntimeError, match="Content-Range"):
+        tool.HTTPRangeClient("https://example/archive", 10).read(0, 9)
+
+
+def test_http_200_range_response_is_rejected(monkeypatch):
+    monkeypatch.setattr(tool.urllib.request, "urlopen", lambda *_a, **_k: Response(
+        b"whole archive", status=200
+    ))
+    with pytest.raises(RuntimeError, match="HTTP 200"):
+        tool.HTTPRangeClient("https://example/archive", 100).read(0, 9)
+
+
+def _compressed_case(data: bytes):
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    compressed = compressor.compress(data) + compressor.flush()
+
+    class Client:
+        def chunks(self, _start, _end):
+            yield compressed
+
+    return Client(), compressed
+
+
+def test_raw_deflate_member_download(tmp_path):
+    data = b"ordinary ZIP member" * 100
+    client, compressed = _compressed_case(data)
+    output = tmp_path / "model"
+    tool._expand_deflate_range(
+        client, 0, len(compressed) - 1, output,
+        compressed_size=len(compressed), expanded_size=len(data),
+        expected_crc=zlib.crc32(data), expected_sha256=hashlib.sha256(data).hexdigest(),
+    )
+    assert output.read_bytes() == data
+
+
+@pytest.mark.parametrize("failure", ["truncated", "overlong", "crc", "sha"])
+def test_corrupt_member_downloads_are_rejected(tmp_path, failure):
+    data = b"model data" * 100
+    client, compressed = _compressed_case(data)
+    kwargs = dict(compressed_size=len(compressed), expanded_size=len(data),
+                  expected_crc=zlib.crc32(data),
+                  expected_sha256=hashlib.sha256(data).hexdigest())
+    if failure == "truncated":
+        kwargs["compressed_size"] += 1
+    elif failure == "overlong":
+        kwargs["expanded_size"] -= 1
+    elif failure == "crc":
+        kwargs["expected_crc"] ^= 1
+    else:
+        kwargs["expected_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError):
+        tool._expand_deflate_range(client, 0, len(compressed) - 1,
+                                   tmp_path / failure, **kwargs)
+
+
+def test_zip64_extra_supports_large_sizes():
+    large_expanded, large_compressed = 6_000_000_000, 5_000_000_000
+    extra = b"\x01\x00\x10\x00" + large_expanded.to_bytes(8, "little") \
+        + large_compressed.to_bytes(8, "little")
+    assert tool._zip64_values(extra) == [large_expanded, large_compressed]
+
+
+def test_zip_metadata_derives_member_bounds_and_checks_local_header(monkeypatch):
+    data = b"member" * 100
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(tool.LANGUAGE_MODEL_MEMBER, data)
+    payload = bytearray(output.getvalue())
+
+    class MemoryClient:
+        size = len(payload)
+
+        def read(self, start, end):
+            return bytes(payload[start:end + 1])
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        expected = archive.getinfo(tool.LANGUAGE_MODEL_MEMBER)
+    monkeypatch.setattr(tool, "LANGUAGE_MODEL_SIZE", len(data))
+    monkeypatch.setattr(tool, "LANGUAGE_MODEL_COMPRESSED_SIZE", expected.compress_size)
+    monkeypatch.setattr(tool, "LANGUAGE_MODEL_CRC32", expected.CRC)
+    info, start, end = tool.inspect_zenodo_member(MemoryClient())
+    assert end - start + 1 == info.compress_size
+
+    payload[info.header_offset + 30] ^= 1
+    with pytest.raises(RuntimeError, match="local and central"):
+        tool.inspect_zenodo_member(MemoryClient())
+
+
+def test_insufficient_disk_space(monkeypatch, tmp_path):
+    usage = type("Usage", (), {"free": 1})()
+    monkeypatch.setattr(tool.shutil, "disk_usage", lambda _path: usage)
+    with pytest.raises(RuntimeError, match="Insufficient disk space"):
+        tool._check_model_space(tmp_path)
+
+
+def test_retry_exhaustion(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tool.time, "sleep", lambda _seconds: None)
+
+    def fail(*_args, **_kwargs):
+        calls.append(1)
+        raise urllib.error.URLError("interrupted")
+
+    monkeypatch.setattr(tool.urllib.request, "urlopen", fail)
+    with pytest.raises(RuntimeError, match="range request failed"):
+        tool.HTTPRangeClient("https://example/archive", 10, retries=2).read(0, 9)
+    assert len(calls) == 3
+
+
+@pytest.mark.skipif(not os.environ.get("PATHBENCH_LIVE_ZENODO_METADATA"),
+                    reason="set PATHBENCH_LIVE_ZENODO_METADATA=1 for live range check")
+def test_live_zenodo_metadata():
+    client = tool.HTTPRangeClient(tool.LANGUAGE_MODEL_URL,
+                                  tool.LANGUAGE_MODEL_ARCHIVE_SIZE)
+    info, start, end = tool.inspect_zenodo_member(client)
+    assert info.filename == tool.LANGUAGE_MODEL_MEMBER
+    assert end - start + 1 == tool.LANGUAGE_MODEL_COMPRESSED_SIZE
+    assert (start, end) == (18_177_078_384, 26_759_745_295)

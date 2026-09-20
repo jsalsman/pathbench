@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.client
+import io
 import os
 from pathlib import Path
 import shutil
@@ -37,16 +38,30 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import binascii
+import re
+import struct
+import zlib
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 MODEL_NAMES = ("wiki_en_token.arpa.bin", "wiki_en_token.arpa")
 # The versioned record URL is deliberately not the mutable ``latest`` link.
 LANGUAGE_MODEL_URL = (
-    "https://zenodo.org/records/18738598/files/wiki_en_token.arpa.bin?download=1"
+    "https://zenodo.org/api/records/18738598/files/lms.zip/content"
 )
-# SHA-256 published for the English binary in Zenodo record 18738598.
+# The MD5 describes the complete archive.  Range extraction cannot verify it.
+LANGUAGE_MODEL_ARCHIVE_SIZE = 35_017_940_434
+LANGUAGE_MODEL_ARCHIVE_MD5 = "01d62027902e93270e5f0d00806c473c"
+LANGUAGE_MODEL_MEMBER = "lms/wiki_en_token.arpa.bin"
+LANGUAGE_MODEL_SIZE = 14_600_342_241
+LANGUAGE_MODEL_COMPRESSED_SIZE = 8_582_666_912
+LANGUAGE_MODEL_CRC32 = 0x5AFB90EF
+# Independently calculated from the extracted English model (not the ZIP bytes).
 LANGUAGE_MODEL_SHA256 = "8c5f43d9758f1af5b36740b45957d78690a7e712686270981d4f8db2262e74f7"
+USER_AGENT = "PathBench GPU predictor model installer/1.0"
+RANGE_BLOCK_SIZE = 1024 * 1024
+RANGE_RETRIES = 4
 
 
 class CommandError(RuntimeError):
@@ -131,6 +146,202 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+class HTTPRangeClient:
+    """Strict, retrying HTTP byte-range client for a pinned immutable object."""
+
+    def __init__(self, url: str, size: int, *, retries: int = RANGE_RETRIES) -> None:
+        self.url = url
+        self.size = size
+        self.retries = retries
+
+    def _open(self, start: int, end: int):
+        if start < 0 or end < start or end >= self.size:
+            raise RuntimeError(f"Invalid archive byte range {start}-{end}")
+        request = urllib.request.Request(
+            self.url,
+            headers={"Range": f"bytes={start}-{end}", "User-Agent": USER_AGENT},
+        )
+        response = urllib.request.urlopen(request, timeout=60)
+        status = getattr(response, "status", None) or response.getcode()
+        if status != 206:
+            response.close()
+            raise RuntimeError(
+                f"Range server returned HTTP {status}, not 206; refusing a possible "
+                f"full {self.size:,}-byte archive response"
+            )
+        value = response.headers.get("Content-Range")
+        match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", value or "")
+        if not match:
+            response.close()
+            raise RuntimeError(f"Malformed or missing Content-Range: {value!r}")
+        reported = tuple(map(int, match.groups()))
+        if reported != (start, end, self.size):
+            response.close()
+            raise RuntimeError(
+                f"Unexpected Content-Range {value!r}; expected bytes "
+                f"{start}-{end}/{self.size}"
+            )
+        return response
+
+    @staticmethod
+    def _transient(error: BaseException) -> bool:
+        if isinstance(error, RuntimeError):
+            return False
+        if isinstance(error, urllib.error.HTTPError):
+            return error.code in {408, 425, 429, 500, 502, 503, 504}
+        return isinstance(error, (OSError, http.client.HTTPException,
+                                  urllib.error.URLError))
+
+    def read(self, start: int, end: int) -> bytes:
+        for attempt in range(self.retries + 1):
+            try:
+                with self._open(start, end) as response:
+                    data = response.read(end - start + 1)
+                    if response.read(1) or len(data) != end - start + 1:
+                        raise OSError("truncated or overlong HTTP range response")
+                    return data
+            except Exception as error:
+                if not self._transient(error) or attempt == self.retries:
+                    raise RuntimeError(f"HTTP range request failed: {error}") from error
+                time.sleep(min(2 ** attempt, 8))
+        raise AssertionError("unreachable")
+
+    def chunks(self, start: int, end: int, chunk_size: int = 4 * 1024 * 1024):
+        """Yield an exact interval, resuming interrupted responses with a new range."""
+        position = start
+        failures = 0
+        while position <= end:
+            response = None
+            try:
+                response = self._open(position, end)
+                while position <= end:
+                    chunk = response.read(min(chunk_size, end - position + 1))
+                    if not chunk:
+                        raise OSError("truncated HTTP range response")
+                    position += len(chunk)
+                    yield chunk
+                if response.read(1):
+                    raise OSError("overlong HTTP range response")
+                failures = 0
+            except Exception as error:
+                if not self._transient(error) or failures >= self.retries:
+                    raise RuntimeError(f"HTTP range download failed: {error}") from error
+                time.sleep(min(2 ** failures, 8))
+                failures += 1
+            finally:
+                if response is not None:
+                    response.close()
+
+
+class BufferedHTTPRangeReader(io.RawIOBase):
+    """Seekable range-backed file with block coalescing for ZIP metadata reads."""
+
+    def __init__(self, client: HTTPRangeClient, block_size: int = RANGE_BLOCK_SIZE):
+        self.client = client
+        self.block_size = block_size
+        self.position = 0
+        self.cache: dict[int, bytes] = {}
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.position
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        positions = {os.SEEK_SET: offset, os.SEEK_CUR: self.position + offset,
+                     os.SEEK_END: self.client.size + offset}
+        if whence not in positions or positions[whence] < 0:
+            raise ValueError("invalid seek")
+        self.position = positions[whence]
+        return self.position
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = self.client.size - self.position
+        size = min(size, self.client.size - self.position)
+        output = bytearray()
+        while size > 0:
+            block = self.position // self.block_size
+            if block not in self.cache:
+                start = block * self.block_size
+                end = min(start + self.block_size, self.client.size) - 1
+                self.cache[block] = self.client.read(start, end)
+            data = self.cache[block]
+            within = self.position - block * self.block_size
+            take = min(size, len(data) - within)
+            output.extend(data[within:within + take])
+            self.position += take
+            size -= take
+        return bytes(output)
+
+
+def _zip64_values(extra: bytes) -> list[int]:
+    position = 0
+    while position + 4 <= len(extra):
+        kind, length = struct.unpack_from("<HH", extra, position)
+        value = extra[position + 4:position + 4 + length]
+        if len(value) != length:
+            raise RuntimeError("Truncated ZIP extra field")
+        if kind == 1:
+            if length % 8:
+                raise RuntimeError("Malformed ZIP64 extra field")
+            return list(struct.unpack(f"<{length // 8}Q", value))
+        position += 4 + length
+    return []
+
+
+def inspect_zenodo_member(client: HTTPRangeClient) -> tuple[zipfile.ZipInfo, int, int]:
+    """Read ZIP/ZIP64 metadata remotely and return the raw DEFLATE interval."""
+    reader = BufferedHTTPRangeReader(client)
+    try:
+        with zipfile.ZipFile(reader) as archive:
+            info = archive.getinfo(LANGUAGE_MODEL_MEMBER)
+    except (KeyError, zipfile.BadZipFile, OSError) as error:
+        raise RuntimeError(f"Cannot inspect Zenodo ZIP metadata: {error}") from error
+    if not _safe_member(info.filename) or info.filename != LANGUAGE_MODEL_MEMBER:
+        raise RuntimeError(f"Unsafe or unexpected ZIP member name: {info.filename!r}")
+    expected = (zipfile.ZIP_DEFLATED, LANGUAGE_MODEL_SIZE,
+                LANGUAGE_MODEL_COMPRESSED_SIZE, LANGUAGE_MODEL_CRC32)
+    actual = (info.compress_type, info.file_size, info.compress_size, info.CRC)
+    if actual != expected:
+        raise RuntimeError(f"Zenodo member metadata changed: {actual!r} != {expected!r}")
+    if info.flag_bits & 1:
+        raise RuntimeError("Encrypted ZIP members are unsupported")
+
+    fixed = client.read(info.header_offset, info.header_offset + 29)
+    signature, _version, flags, method, _time, _date, crc, compressed, expanded, name_len, extra_len = \
+        struct.unpack("<IHHHHHIIIHH", fixed)
+    if signature != 0x04034B50:
+        raise RuntimeError("Invalid ZIP local-header signature")
+    variable = client.read(info.header_offset + 30,
+                           info.header_offset + 29 + name_len + extra_len)
+    raw_name, extra = variable[:name_len], variable[name_len:]
+    encoding = "utf-8" if flags & 0x800 else "cp437"
+    try:
+        local_name = raw_name.decode(encoding)
+    except UnicodeDecodeError as error:
+        raise RuntimeError("Invalid ZIP local-header filename") from error
+    if local_name != info.filename or method != info.compress_type or flags != info.flag_bits:
+        raise RuntimeError("ZIP local and central headers are inconsistent")
+    if method != zipfile.ZIP_DEFLATED or flags & 1:
+        raise RuntimeError("Unsupported or encrypted ZIP member")
+    if not flags & 8:
+        values = iter(_zip64_values(extra))
+        local_expanded = next(values, None) if expanded == 0xFFFFFFFF else expanded
+        local_compressed = next(values, None) if compressed == 0xFFFFFFFF else compressed
+        if (crc, local_compressed, local_expanded) != (info.CRC, info.compress_size, info.file_size):
+            raise RuntimeError("ZIP local and central size/CRC metadata are inconsistent")
+    elif crc not in (0, info.CRC) or compressed not in (0, 0xFFFFFFFF, info.compress_size) \
+            or expanded not in (0, 0xFFFFFFFF, info.file_size):
+        raise RuntimeError("ZIP data-descriptor placeholders are inconsistent")
+    start = info.header_offset + 30 + name_len + extra_len
+    return info, start, start + info.compress_size - 1
+
+
 def _safe_member(name: str) -> bool:
     path = Path(name.replace("\\", "/"))
     return not path.is_absolute() and ".." not in path.parts
@@ -171,10 +382,106 @@ def _extract_model(archive: Path, destination: Path) -> Path:
         return target
 
 
-def install_language_model(
-    url: str, expected_sha256: str, cache_dir: Path, *, force: bool = False
+def _check_model_space(directory: Path, required_size: int = LANGUAGE_MODEL_SIZE) -> None:
+    """Require room for the staged model plus a conservative one-GiB margin."""
+    available = shutil.disk_usage(directory).free
+    required = required_size + 1024 ** 3
+    if available < required:
+        raise RuntimeError(
+            f"Insufficient disk space: {available:,} bytes free; {required:,} required "
+            "for the temporary expanded model and safety margin"
+        )
+
+
+def _expand_deflate_range(
+    client: HTTPRangeClient, start: int, end: int, destination: Path, *,
+    compressed_size: int = LANGUAGE_MODEL_COMPRESSED_SIZE,
+    expanded_size: int = LANGUAGE_MODEL_SIZE,
+    expected_crc: int = LANGUAGE_MODEL_CRC32,
+    expected_sha256: str = LANGUAGE_MODEL_SHA256,
+) -> None:
+    """Download and authenticate one raw-DEFLATE ZIP member."""
+    inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+    transferred = expanded = crc = 0
+    digest = hashlib.sha256()
+    last_report = time.monotonic()
+    with destination.open("wb") as output:
+        for chunk in client.chunks(start, end):
+            transferred += len(chunk)
+            if transferred > compressed_size:
+                raise RuntimeError("Compressed member exceeds its advertised size")
+            data = inflater.decompress(chunk, expanded_size - expanded + 1)
+            if inflater.unconsumed_tail:
+                raise RuntimeError("Expanded model exceeds its advertised size")
+            expanded += len(data)
+            if expanded > expanded_size:
+                raise RuntimeError("Expanded model exceeds its advertised size")
+            output.write(data)
+            crc = binascii.crc32(data, crc)
+            digest.update(data)
+            if time.monotonic() - last_report >= 5:
+                print(f"Transferred {transferred:,}/{compressed_size:,}; expanded "
+                      f"{expanded:,}/{expanded_size:,} bytes...", flush=True)
+                last_report = time.monotonic()
+        tail = inflater.flush()
+        expanded += len(tail)
+        if expanded > expanded_size:
+            raise RuntimeError("Expanded model exceeds its advertised size")
+        output.write(tail)
+        crc = binascii.crc32(tail, crc)
+        digest.update(tail)
+    print(f"Transferred {transferred:,}/{compressed_size:,}; expanded "
+          f"{expanded:,}/{expanded_size:,} bytes.", flush=True)
+    if transferred != compressed_size:
+        raise RuntimeError(f"Compressed size mismatch: {transferred:,} != {compressed_size:,}")
+    if not inflater.eof or inflater.unused_data:
+        raise RuntimeError("Truncated or trailing compressed member data")
+    if expanded != expanded_size:
+        raise RuntimeError(f"Expanded size mismatch: {expanded:,} != {expanded_size:,}")
+    if crc & 0xFFFFFFFF != expected_crc:
+        raise RuntimeError(f"Model CRC-32 mismatch: {crc & 0xFFFFFFFF:08x}")
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256.lower():
+        raise RuntimeError(
+            f"Model SHA-256 mismatch (expected {expected_sha256}, got {actual_sha256})"
+        )
+
+
+def install_zenodo_language_model(
+    *, force: bool = False, validator=None,
 ) -> Path:
-    """Fetch a verified model artifact into the cache and install its model."""
+    """Range-extract, validate, and atomically install the pinned ZIP member."""
+    models_dir = REPO_ROOT / "lms"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    installed = models_dir / Path(LANGUAGE_MODEL_MEMBER).name
+    if not force and installed.is_file() and installed.stat().st_size == LANGUAGE_MODEL_SIZE \
+            and sha256(installed) == LANGUAGE_MODEL_SHA256:
+        print(f"Reusing verified installed language model: {installed}")
+        return installed
+    print(
+        "The Zenodo range download will transfer approximately 8.0 GiB and install "
+        "a 13.6 GiB English language model. Additional temporary space and a 1 GiB "
+        "safety margin are required.", flush=True,
+    )
+    _check_model_space(models_dir)
+    client = HTTPRangeClient(LANGUAGE_MODEL_URL, LANGUAGE_MODEL_ARCHIVE_SIZE)
+    _info, start, end = inspect_zenodo_member(client)
+    temporary = Path(tempfile.mkstemp(prefix=".wiki-en-", dir=models_dir)[1])
+    try:
+        _expand_deflate_range(client, start, end, temporary)
+        if validator is not None:
+            validator(temporary)
+        os.replace(temporary, installed)
+        return installed
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def install_language_model(
+    url: str, expected_sha256: str, cache_dir: Path, *, force: bool = False,
+    validator=None,
+) -> Path:
+    """Install a custom standalone file/archive with a user-supplied digest."""
     if not expected_sha256 or len(expected_sha256) != 64:
         raise RuntimeError("A pinned 64-character SHA-256 is required for the language model")
     expected_sha256 = expected_sha256.lower()
@@ -221,6 +528,8 @@ def install_language_model(
         extracted = _extract_model(artifact, staging)
         if extracted.stat().st_size == 0:
             raise RuntimeError("Downloaded language model is empty")
+        if validator is not None:
+            validator(extracted)
         installed = models_dir / extracted.name
         if installed.name == "wiki_en_token.arpa":
             # The evaluator prefers the binary whenever it exists. Removing a
@@ -269,13 +578,17 @@ def prepare_language_model(
     cache_dir: Path,
     force: bool,
     installed_sha256: str | None,
+    validator=None,
 ) -> Path | None:
     """Reuse an installed model, unless an opted-in forced refresh was requested."""
     model = installed_language_model(installed_sha256)
     if download and (model is None or force):
-        return install_language_model(
-            url, expected_sha256, cache_dir, force=force,
-        )
+        if url == LANGUAGE_MODEL_URL:
+            return install_zenodo_language_model(force=force, validator=validator)
+        kwargs = {"force": force}
+        if validator is not None:
+            kwargs["validator"] = validator
+        return install_language_model(url, expected_sha256, cache_dir, **kwargs)
     return model
 
 
@@ -396,6 +709,7 @@ def main() -> int:
             cache_dir=args.language_model_cache,
             force=args.force_language_model_download,
             installed_sha256=known_installed_digest,
+            validator=lambda path: validate_language_model(venv_python, path),
         )
         if model is None:
             print(
